@@ -1,0 +1,41 @@
+{
+	"name": "opencode-antigravity-auth-v2",
+	"version": "0.1.0",
+	"description": "OpenCode V2 adapter for opencode-antigravity-auth: Antigravity/Gemini CLI OAuth accounts, rotation and quota on the native google provider",
+	"license": "MIT",
+	"author": "Raul Tovar (https://github.com/raultov)",
+	"type": "module",
+	"main": "dist/index.js",
+	"types": "dist/index.d.ts",
+	"exports": {
+		".": {
+			"types": "./dist/index.d.ts",
+			"default": "./dist/index.js"
+		}
+	},
+	"engines": {
+		"node": ">=18"
+	},
+	"files": [
+		"dist",
+		"README.md"
+	],
+	"scripts": {
+		"test": "bun test",
+		"typecheck": "tsc",
+		"build": "tsup",
+		"lint": "biome lint",
+		"check": "biome check --write"
+	},
+	"dependencies": {
+		"opencode-antigravity-auth": "^1.6.0"
+	},
+	"devDependencies": {
+		"@biomejs/biome": "^2.5.0",
+		"@opencode/plugin": "^2.0.26",
+		"@types/bun": "latest",
+		"@types/node": "^22.0.0",
+		"tsup": "^8.5.1",
+		"typescript": "^5.5.0"
+	}
+}
