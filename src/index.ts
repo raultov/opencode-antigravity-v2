@@ -16,9 +16,11 @@
  * | retry with the next account/endpoint | `retry` hook                         |
  *
  * Everything heavy (account pool, tokens, request preparation, response
- * transformation) is reused from the upstream package by module path.
+ * transformation) is reused from the upstream package by module path. On V1
+ * the default export's `server` entry runs the upstream plugin as is.
  */
 import { define, type Plugin } from "@opencode/plugin/promise/plugin";
+import { GoogleOAuthPlugin } from "opencode-antigravity-auth";
 import { readProviderAuth, writeProviderAuth } from "./auth-store.js";
 import {
 	buildManagedRequest,
@@ -192,4 +194,42 @@ export function createAntigravityAuthV2(
 /** The V2 plugin entrypoint. */
 export const AntigravityAuthV2 = createAntigravityAuthV2();
 
-export default AntigravityAuthV2;
+/**
+ * Builds the V1 entrypoint: the upstream plugin, unchanged. V1 still has the
+ * `auth` hook and fetch takeover that the V2 adapter rebuilds, so nothing is
+ * ported. Upstream reads its settings from `antigravity.json`, not from the
+ * plugin options, so options given here are reported in the log rather than
+ * applied.
+ */
+export function createAntigravityAuthV1(upstream = GoogleOAuthPlugin) {
+	return async (
+		input: Parameters<typeof GoogleOAuthPlugin>[0],
+		options?: AntigravityV2Options,
+	) => {
+		if (options && Object.keys(options).length > 0) {
+			await Promise.resolve(
+				input.client.app.log({
+					body: {
+						service: "antigravity-auth",
+						level: "warn",
+						message:
+							"plugin options are ignored on opencode V1; set them in antigravity.json",
+						extra: { options: Object.keys(options) },
+					},
+				}),
+			).catch(() => undefined);
+		}
+		return upstream(input);
+	};
+}
+
+/** The V1 plugin entrypoint. */
+export const AntigravityAuthV1 = createAntigravityAuthV1();
+
+/** One module for both generations: V2 reads `id`/`setup`, V1 reads `server`. */
+const AntigravityAuthModule = {
+	...AntigravityAuthV2,
+	server: AntigravityAuthV1,
+};
+
+export default AntigravityAuthModule;

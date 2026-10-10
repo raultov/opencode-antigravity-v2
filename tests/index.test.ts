@@ -1,6 +1,10 @@
 import { describe, expect, test } from "bun:test";
 import type { Plugin } from "@opencode/plugin/promise/plugin";
-import { createAntigravityAuthV2 } from "../src/index.js";
+import AntigravityAuthModule, {
+	AntigravityAuthV1,
+	createAntigravityAuthV1,
+	createAntigravityAuthV2,
+} from "../src/index.js";
 import type { PipelineDeps } from "../src/pipeline.js";
 import type { ManagedAccount, OAuthAuthDetails } from "../src/upstream.js";
 
@@ -194,5 +198,47 @@ describe("AntigravityAuthV2", () => {
 		};
 		await hooks.get("retry")?.(retry);
 		expect(retry.decision.retry).toBe(false);
+	});
+});
+
+describe("AntigravityAuthV1", () => {
+	// biome-ignore lint/suspicious/noExplicitAny: the V1 client is typed upstream against an SDK this package does not install
+	type V1Input = any;
+
+	function v1Input() {
+		const logs: unknown[] = [];
+		const input: V1Input = {
+			client: { app: { log: async (entry: unknown) => logs.push(entry) } },
+			directory: "/tmp/project",
+		};
+		return { input, logs };
+	}
+
+	test("the default export serves both generations", () => {
+		expect(AntigravityAuthModule.id).toBe("antigravity-auth");
+		expect(typeof AntigravityAuthModule.setup).toBe("function");
+		expect(AntigravityAuthModule.server).toBe(AntigravityAuthV1);
+	});
+
+	test("delegates to the upstream plugin with the V1 input", async () => {
+		const { input, logs } = v1Input();
+		let received: unknown;
+		const upstream = async (arg: unknown) => {
+			received = arg;
+			return { auth: { provider: "google" } };
+		};
+		const server = createAntigravityAuthV1(upstream as V1Input);
+		const result = await server(input);
+		expect(received).toBe(input);
+		expect(result).toEqual({ auth: { provider: "google" } } as V1Input);
+		expect(logs).toHaveLength(0);
+	});
+
+	test("reports plugin options instead of silently dropping them", async () => {
+		const { input, logs } = v1Input();
+		const server = createAntigravityAuthV1((async () => ({})) as V1Input);
+		await server(input, { soft_quota_threshold_percent: 100 });
+		expect(logs).toHaveLength(1);
+		expect(JSON.stringify(logs[0])).toContain("soft_quota_threshold_percent");
 	});
 });
