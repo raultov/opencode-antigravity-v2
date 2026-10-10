@@ -1,9 +1,17 @@
 {
-	"name": "opencode-antigravity-auth-v2",
+	"name": "@raultov/opencode-antigravity-v2",
 	"version": "0.1.0",
 	"description": "OpenCode V2 adapter for opencode-antigravity-auth: Antigravity/Gemini CLI OAuth accounts, rotation and quota on the native google provider",
 	"license": "MIT",
 	"author": "Raul Tovar (https://github.com/raultov)",
+	"repository": {
+		"type": "git",
+		"url": "git+https://github.com/raultov/opencode-antigravity-v2.git"
+	},
+	"homepage": "https://github.com/raultov/opencode-antigravity-v2#readme",
+	"bugs": {
+		"url": "https://github.com/raultov/opencode-antigravity-v2/issues"
+	},
 	"type": "module",
 	"main": "dist/index.js",
 	"types": "dist/index.d.ts",
@@ -12,6 +20,10 @@
 			"types": "./dist/index.d.ts",
 			"default": "./dist/index.js"
 		}
+	},
+	"publishConfig": {
+		"access": "public",
+		"provenance": true
 	},
 	"engines": {
 		"node": ">=18"
