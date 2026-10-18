@@ -73,6 +73,27 @@ These apply to the V2 adapter.
 | `cli_first`                     | `false`    | Prefer Gemini CLI quota over Antigravity quota for Gemini models.  |
 | `pid_offset_enabled`            | `false`    | Upstream per-account project offset behaviour.                     |
 
+## Gemini 4 Argon
+
+Gemini 4 Argon is reachable only under two conditions, both handled here:
+
+1. **Client identity.** The Code Assist backend serves Argon only to the
+   Antigravity CLI identity (`antigravity/cli/...`). Requests stamped with the
+   IDE identity (`antigravity/<version> <os>/<arch>`) get a 404 for every
+   Argon id. The adapter forces the CLI identity onto the account fingerprint,
+   which request preparation turns into the outgoing `User-Agent`, and migrates
+   already-stored fingerprints on startup.
+2. **Model id.** The backend addresses Argon by its tiered ids
+   (`gemini-4-argon-low|medium|high`); the bare `gemini-4-argon` that opencode
+   lists is not a valid id. The adapter aliases it to `gemini-4-argon-medium`
+   and leaves the tiered ids untouched.
+
+Both entrypoints get the fixes. On V1 the upstream plugin sends the fingerprint
+`User-Agent` verbatim and never aliases model ids, so the adapter migrates the
+stored fingerprints before the pool loads and rewrites the model id in the
+requests before delegating to the upstream fetch. The Gemini 4 Argon quota is
+separate from the main Gemini quota on Pro plans, as reported by `agy`.
+
 ## What is and is not ported
 
 This applies to V2 only. V1 runs the upstream plugin, so every upstream feature is there.
@@ -81,6 +102,11 @@ Ported: account selection and rotation, proactive token refresh, quota/rate-limi
 Antigravity vs Gemini CLI quota routing (including model `:antigravity` / `:cli` suffixes),
 endpoint fallbacks on capacity errors, request rewriting (`cloudcode-pa.googleapis.com`, quota
 headers, thinking options) and streamed response transformation.
+
+Also handled by the adapter rather than the upstream: the CLI client identity and the
+Gemini 4 Argon model alias described above, and the managed Cloud project resolution
+(`ensureProjectContext`) that V2 previously skipped — it used to send an empty project id,
+which preparation replaced with a synthetic project no subscription is attached to.
 
 Not yet ported: the `google_search` tool, the V1 `event` hook behaviours (image saving, debug
 thinking injection), thinking warmup requests, and TUI toasts (logged instead).

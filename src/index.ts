@@ -23,6 +23,10 @@ import { define, type Plugin } from "@opencode/plugin/promise/plugin";
 import { GoogleOAuthPlugin } from "opencode-antigravity-auth";
 import { readProviderAuth, writeProviderAuth } from "./auth-store.js";
 import {
+	migrateFingerprintsToCliUserAgent,
+	rewriteRequestModel,
+} from "./identity.js";
+import {
 	buildManagedRequest,
 	type LogLevel,
 	type ManagedRequestMeta,
@@ -32,6 +36,8 @@ import {
 } from "./pipeline.js";
 import {
 	AccountManager,
+	ensureProjectContext,
+	getStoragePath,
 	isGenerativeLanguageRequest,
 	type OAuthAuthDetails,
 	prepareAntigravityRequest,
@@ -102,6 +108,7 @@ export function createAntigravityAuthV2(
 				loadManager: async (auth) => AccountManager.loadFromDisk(auth),
 				refresh: (auth) =>
 					refreshAccessToken(auth, client, settings.providerID),
+				projectContext: (auth) => ensureProjectContext(auth),
 				prepare: prepareAntigravityRequest,
 				now: Date.now,
 				sleep: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
@@ -195,17 +202,49 @@ export function createAntigravityAuthV2(
 export const AntigravityAuthV2 = createAntigravityAuthV2();
 
 /**
- * Builds the V1 entrypoint: the upstream plugin, unchanged. V1 still has the
- * `auth` hook and fetch takeover that the V2 adapter rebuilds, so nothing is
- * ported. Upstream reads its settings from `antigravity.json`, not from the
- * plugin options, so options given here are reported in the log rather than
- * applied.
+ * Rewrites the model id in the requests opencode sends to the upstream fetch.
+ *
+ * The upstream plugin reads the model out of the URL and never aliases it, so
+ * an id like `gemini-4-argon` reaches the backend and comes back 404. Aliasing
+ * here keeps every downstream step — routing, quota keys, the prepared body —
+ * on the id the backend actually serves.
  */
-export function createAntigravityAuthV1(upstream = GoogleOAuthPlugin) {
+function withModelAlias(
+	inner: (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>,
+): (input: RequestInfo | URL, init?: RequestInit) => Promise<Response> {
+	return (input, init) => inner(rewriteRequestModel(input), init);
+}
+
+/**
+ * Builds the V1 entrypoint: the upstream plugin with two adapter-level fixes.
+ *
+ * V1 still has the `auth` hook and fetch takeover that the V2 adapter rebuilds,
+ * so nothing is ported. What the upstream cannot do for itself is done around
+ * it: stored account fingerprints are moved onto the CLI User-Agent (the
+ * backend only serves Gemini 4 Argon to that identity), and the models opencode
+ * advertises under ids the backend does not serve are aliased before they reach
+ * the upstream fetch.
+ *
+ * Upstream reads its settings from `antigravity.json`, not from the plugin
+ * options, so options given here are reported in the log rather than applied.
+ *
+ * `resolveAccountsPath` names the account pool to migrate and is required: that
+ * file is live user state, so it must be named rather than defaulted, which
+ * keeps tests from ever writing to a real pool by accident.
+ */
+export function createAntigravityAuthV1(
+	upstream = GoogleOAuthPlugin,
+	resolveAccountsPath: () => string,
+) {
 	return async (
 		input: Parameters<typeof GoogleOAuthPlugin>[0],
 		options?: AntigravityV2Options,
 	) => {
+		// Migrated before the upstream loads the pool, so the identity it reads
+		// from disk is already the one the backend accepts.
+		await migrateFingerprintsToCliUserAgent(resolveAccountsPath()).catch(
+			() => 0,
+		);
 		if (options && Object.keys(options).length > 0) {
 			await Promise.resolve(
 				input.client.app.log({
@@ -219,12 +258,36 @@ export function createAntigravityAuthV1(upstream = GoogleOAuthPlugin) {
 				}),
 			).catch(() => undefined);
 		}
-		return upstream(input);
+		const result = await upstream(input);
+		const loader = result?.auth?.loader;
+		if (typeof loader !== "function") return result;
+		result.auth.loader = (async (
+			getAuth: Parameters<typeof loader>[0],
+			provider: Parameters<typeof loader>[1],
+		) => {
+			const loaded = await loader(getAuth, provider);
+			if (loaded && typeof loaded === "object" && "fetch" in loaded) {
+				const fetchable = loaded as {
+					fetch: (
+						input: RequestInfo | URL,
+						init?: RequestInit,
+					) => Promise<Response>;
+				};
+				if (typeof fetchable.fetch === "function") {
+					fetchable.fetch = withModelAlias(fetchable.fetch.bind(fetchable));
+				}
+			}
+			return loaded;
+		}) as typeof loader;
+		return result;
 	};
 }
 
 /** The V1 plugin entrypoint. */
-export const AntigravityAuthV1 = createAntigravityAuthV1();
+export const AntigravityAuthV1 = createAntigravityAuthV1(
+	GoogleOAuthPlugin,
+	getStoragePath,
+);
 
 /** One module for both generations: V2 reads `id`/`setup`, V1 reads `server`. */
 const AntigravityAuthModule = {

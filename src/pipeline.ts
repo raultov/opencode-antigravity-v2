@@ -8,6 +8,7 @@
  * request and the metadata the response hook needs, and the retry policy is
  * applied through the `retry` hook.
  */
+import { cliFingerprint, rewriteModelAliasInUrl } from "./identity.js";
 import {
 	ANTIGRAVITY_ENDPOINT_FALLBACKS,
 	type AntigravityConfig,
@@ -17,6 +18,7 @@ import {
 	isGenerativeLanguageRequest,
 	type ManagedAccount,
 	type OAuthAuthDetails,
+	type ProjectContextResult,
 	type prepareAntigravityRequest,
 	resolveHeaderRoutingDecision,
 } from "./upstream.js";
@@ -81,6 +83,12 @@ export type PipelineDeps = {
 	readAuth: (providerID: string) => Promise<OAuthAuthDetails | undefined>;
 	loadManager: (auth: OAuthAuthDetails) => Promise<ManagerLike>;
 	refresh: (auth: OAuthAuthDetails) => Promise<OAuthAuthDetails | undefined>;
+	/**
+	 * Resolves the Cloud project the account is entitled to. The upstream fetch
+	 * does this before every request; leaving it out sends a synthetic project
+	 * id that no subscription is attached to.
+	 */
+	projectContext: (auth: OAuthAuthDetails) => Promise<ProjectContextResult>;
 	prepare: typeof prepareAntigravityRequest;
 	now: () => number;
 	sleep: (ms: number) => Promise<void>;
@@ -157,7 +165,10 @@ export async function buildManagedRequest(
 	settings: PipelineSettings,
 	endpointIndex = 0,
 ): Promise<PipelineResult | undefined> {
-	const urlString = original.url;
+	// The backend serves Gemini 4 Argon only under its tiered id, so the model
+	// is rewritten before anything else reads it: routing, quota keys and the
+	// prepared request must all agree on the id that actually goes on the wire.
+	const urlString = rewriteModelAliasInUrl(original.url);
 	if (!isGenerativeLanguageRequest(urlString)) return undefined;
 	const auth = await deps.readAuth(settings.providerID);
 	if (auth?.type !== "oauth" || !auth.refresh) return undefined;
@@ -257,6 +268,29 @@ export async function buildManagedRequest(
 		await manager.saveToDisk().catch(() => undefined);
 	}
 
+	// Resolving the project before the send keeps the request on the account's
+	// real Cloud project instead of the synthetic one preparation invents when
+	// it is given an empty id. A failure here is not fatal: the fallback project
+	// the resolver returns is still serviceable, so the turn goes ahead.
+	let projectId = "";
+	try {
+		const project = await deps.projectContext(authRecord);
+		projectId = project.effectiveProjectId;
+		if (
+			project.auth.refresh !== authRecord.refresh ||
+			project.auth.access !== authRecord.access
+		) {
+			manager.updateFromAuth(account, project.auth);
+			authRecord = project.auth;
+			await manager.saveToDisk().catch(() => undefined);
+		}
+	} catch (error) {
+		deps.log(
+			"warn",
+			`project context unavailable; falling back to the default project: ${String(error)}`,
+		);
+	}
+
 	const body = await original.clone().text();
 	// The native provider always sends its own credential headers (an empty
 	// `x-goog-api-key` when it has no key). Request preparation adds the
@@ -280,12 +314,16 @@ export async function buildManagedRequest(
 		urlString,
 		init,
 		authRecord.access ?? "",
-		"",
+		projectId,
 		endpoint,
 		headerStyle,
 		false,
 		{
-			fingerprint: (account as { fingerprint?: string }).fingerprint,
+			// Request preparation turns this fingerprint into the outgoing
+			// User-Agent, which is what decides whether Gemini 4 Argon is served.
+			fingerprint: cliFingerprint(
+				(account as { fingerprint?: { userAgent?: string } }).fingerprint,
+			),
 		},
 	);
 

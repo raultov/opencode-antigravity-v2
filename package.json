@@ -1,9 +1,9 @@
 {
 	"name": "@raultov/opencode-antigravity-v2",
-	"version": "0.1.1",
+	"version": "0.2.0",
 	"description": "OpenCode V1 and V2 plugin for opencode-antigravity-auth: Antigravity/Gemini CLI OAuth accounts, rotation and quota on the native google provider",
 	"license": "MIT",
-	"author": "Raul Tovar (https://github.com/raultov)",
+	"author": "raultov (https://github.com/raultov) <raultov@protonmail.com>",
 	"repository": {
 		"type": "git",
 		"url": "git+https://github.com/raultov/opencode-antigravity-v2.git"

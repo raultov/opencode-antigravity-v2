@@ -26,16 +26,21 @@ export {
 } from "opencode-antigravity-auth/dist/src/plugin/auth.js";
 export type { AntigravityConfig } from "opencode-antigravity-auth/dist/src/plugin/config/index.js";
 export { loadConfig } from "opencode-antigravity-auth/dist/src/plugin/config/index.js";
+export { ensureProjectContext } from "opencode-antigravity-auth/dist/src/plugin/project.js";
 export {
 	isGenerativeLanguageRequest,
 	prepareAntigravityRequest,
 	transformAntigravityResponse,
 } from "opencode-antigravity-auth/dist/src/plugin/request.js";
+export { getStoragePath } from "opencode-antigravity-auth/dist/src/plugin/storage.js";
 export {
 	AntigravityTokenRefreshError,
 	refreshAccessToken,
 } from "opencode-antigravity-auth/dist/src/plugin/token.js";
-export type { OAuthAuthDetails } from "opencode-antigravity-auth/dist/src/plugin/types.js";
+export type {
+	OAuthAuthDetails,
+	ProjectContextResult,
+} from "opencode-antigravity-auth/dist/src/plugin/types.js";
 
 /** Header routing (which quota pool a request spends), as the V1 fetch used it. */
 export const resolveHeaderRoutingDecision: (

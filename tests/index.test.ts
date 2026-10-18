@@ -1,5 +1,9 @@
 import { describe, expect, test } from "bun:test";
+import { mkdtemp, readFile, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import type { Plugin } from "@opencode/plugin/promise/plugin";
+import { cliUserAgent } from "../src/identity.js";
 import AntigravityAuthModule, {
 	AntigravityAuthV1,
 	createAntigravityAuthV1,
@@ -214,6 +218,15 @@ describe("AntigravityAuthV1", () => {
 		return { input, logs };
 	}
 
+	/**
+	 * Every call names its own throwaway account pool: the real one is live user
+	 * state and must never be written from a test.
+	 */
+	async function accountsPath() {
+		const dir = await mkdtemp(join(tmpdir(), "agv-v1-"));
+		return join(dir, "antigravity-accounts.json");
+	}
+
 	test("the default export serves both generations", () => {
 		expect(AntigravityAuthModule.id).toBe("antigravity-auth");
 		expect(typeof AntigravityAuthModule.setup).toBe("function");
@@ -227,7 +240,10 @@ describe("AntigravityAuthV1", () => {
 			received = arg;
 			return { auth: { provider: "google" } };
 		};
-		const server = createAntigravityAuthV1(upstream as V1Input);
+		const server = createAntigravityAuthV1(
+			upstream as V1Input,
+			() => "/nonexistent/antigravity-accounts.json",
+		);
 		const result = await server(input);
 		expect(received).toBe(input);
 		expect(result).toEqual({ auth: { provider: "google" } } as V1Input);
@@ -236,9 +252,68 @@ describe("AntigravityAuthV1", () => {
 
 	test("reports plugin options instead of silently dropping them", async () => {
 		const { input, logs } = v1Input();
-		const server = createAntigravityAuthV1((async () => ({})) as V1Input);
+		const server = createAntigravityAuthV1(
+			(async () => ({})) as V1Input,
+			() => "/nonexistent/antigravity-accounts.json",
+		);
 		await server(input, { soft_quota_threshold_percent: 100 });
 		expect(logs).toHaveLength(1);
 		expect(JSON.stringify(logs[0])).toContain("soft_quota_threshold_percent");
+	});
+
+	test("migrates the named account pool onto the CLI identity", async () => {
+		const path = await accountsPath();
+		await writeFile(
+			path,
+			JSON.stringify({
+				accounts: [
+					{
+						email: "a@example.com",
+						fingerprint: {
+							deviceId: "device",
+							userAgent: "antigravity/2.0.6 win32/arm64",
+						},
+					},
+				],
+			}),
+		);
+		const server = createAntigravityAuthV1(
+			(async () => ({})) as V1Input,
+			() => path,
+		);
+		await server(v1Input().input);
+		const stored = JSON.parse(await readFile(path, "utf-8"));
+		expect(stored.accounts[0].fingerprint.userAgent).toBe(cliUserAgent());
+		expect(stored.accounts[0].fingerprint.deviceId).toBe("device");
+	});
+
+	test("aliases the model before the upstream fetch sees it", async () => {
+		const seen: string[] = [];
+		const upstream = async () => ({
+			auth: {
+				provider: "google",
+				loader: async () => ({
+					apiKey: "k",
+					fetch: async (input: RequestInfo | URL) => {
+						seen.push(String(input instanceof Request ? input.url : input));
+						return new Response("{}");
+					},
+				}),
+			},
+		});
+		const server = createAntigravityAuthV1(
+			upstream as V1Input,
+			() => "/nonexistent/antigravity-accounts.json",
+		);
+		const result = await server(v1Input().input);
+		const loader = (result as { auth: { loader: unknown } }).auth.loader as (
+			getAuth: unknown,
+			provider: unknown,
+		) => Promise<{ fetch: (input: RequestInfo | URL) => Promise<Response> }>;
+		const { fetch } = await loader(() => undefined, {});
+		await fetch(
+			"https://generativelanguage.googleapis.com/v1beta/models/gemini-4-argon:streamGenerateContent",
+		);
+		expect(seen[0]).toContain("/models/gemini-4-argon-medium:");
 	});
 });

@@ -77,7 +77,20 @@ function deps(
 		readAuth: async () => freshAuth,
 		loadManager: async () => manager([account]),
 		refresh: async () => freshAuth,
-		prepare: ((input, init, accessToken, projectId, endpoint, headerStyle) => {
+		projectContext: async (auth) => ({
+			auth,
+			effectiveProjectId: "aicode-consumers",
+		}),
+		prepare: ((
+			input,
+			init,
+			accessToken,
+			projectId,
+			endpoint,
+			headerStyle,
+			forceThinkingRecovery,
+			options,
+		) => {
 			prepared.push([
 				input,
 				init,
@@ -85,6 +98,8 @@ function deps(
 				projectId,
 				endpoint,
 				headerStyle,
+				forceThinkingRecovery,
+				options,
 			] as PrepareArgs);
 			return {
 				request:
@@ -147,6 +162,62 @@ describe("buildManagedRequest", () => {
 			"https://cloudcode-pa.googleapis.com/v1beta/models/x:streamGenerateContent",
 		);
 		expect(built?.meta.streaming).toBe(true);
+	});
+
+	test("sends Gemini 4 Argon under the tiered id the backend serves", async () => {
+		const d = deps();
+		const request = new Request(
+			"https://generativelanguage.googleapis.com/v1beta/models/gemini-4-argon:streamGenerateContent",
+			{ method: "POST", body: "{}" },
+		);
+		await buildManagedRequest(request, d, SETTINGS);
+		expect(String(d.prepared[0]?.[0])).toContain(
+			"/models/gemini-4-argon-medium:",
+		);
+	});
+
+	test("leaves tiered Argon ids untouched", async () => {
+		const d = deps();
+		const request = new Request(
+			"https://generativelanguage.googleapis.com/v1beta/models/gemini-4-argon-high:streamGenerateContent",
+			{ method: "POST", body: "{}" },
+		);
+		await buildManagedRequest(request, d, SETTINGS);
+		expect(String(d.prepared[0]?.[0])).toContain(
+			"/models/gemini-4-argon-high:",
+		);
+	});
+
+	test("prepares the request with the CLI User-Agent identity", async () => {
+		const d = deps();
+		const request = new Request(URL, { method: "POST", body: "{}" });
+		await buildManagedRequest(request, d, SETTINGS);
+		const fingerprint = (
+			d.prepared[0]?.[7] as { fingerprint?: { userAgent?: string } }
+		)?.fingerprint;
+		expect(fingerprint?.userAgent?.startsWith("antigravity/cli/")).toBe(true);
+	});
+
+	test("spends quota on the resolved project instead of an empty one", async () => {
+		const d = deps();
+		const request = new Request(URL, { method: "POST", body: "{}" });
+		await buildManagedRequest(request, d, SETTINGS);
+		expect(d.prepared[0]?.[3]).toBe("aicode-consumers");
+	});
+
+	test("keeps the turn going when the project cannot be resolved", async () => {
+		const d = deps({
+			projectContext: async () => {
+				throw new Error("loadCodeAssist unreachable");
+			},
+		});
+		const built = await buildManagedRequest(
+			new Request(URL, { method: "POST", body: "{}" }),
+			d,
+			SETTINGS,
+		);
+		expect(built).toBeDefined();
+		expect(d.prepared[0]?.[3]).toBe("");
 	});
 
 	test("refreshes an expired token and persists it", async () => {
