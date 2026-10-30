@@ -13,6 +13,11 @@
  */
 import { __testExports } from "opencode-antigravity-auth/dist/src/plugin.js";
 
+export type { AntigravityTokenExchangeResult } from "opencode-antigravity-auth/dist/src/antigravity/oauth.js";
+export {
+	authorizeAntigravity,
+	exchangeAntigravity,
+} from "opencode-antigravity-auth/dist/src/antigravity/oauth.js";
 export {
 	ANTIGRAVITY_ENDPOINT_FALLBACKS,
 	ANTIGRAVITY_ENDPOINT_PROD,
@@ -23,6 +28,7 @@ export { AccountManager } from "opencode-antigravity-auth/dist/src/plugin/accoun
 export {
 	accessTokenExpired,
 	isOAuthAuth,
+	parseRefreshParts,
 } from "opencode-antigravity-auth/dist/src/plugin/auth.js";
 export type { AntigravityConfig } from "opencode-antigravity-auth/dist/src/plugin/config/index.js";
 export { loadConfig } from "opencode-antigravity-auth/dist/src/plugin/config/index.js";
@@ -32,7 +38,14 @@ export {
 	prepareAntigravityRequest,
 	transformAntigravityResponse,
 } from "opencode-antigravity-auth/dist/src/plugin/request.js";
-export { getStoragePath } from "opencode-antigravity-auth/dist/src/plugin/storage.js";
+export type { OAuthListener } from "opencode-antigravity-auth/dist/src/plugin/server.js";
+export { startOAuthListener } from "opencode-antigravity-auth/dist/src/plugin/server.js";
+export type { AccountStorageV4 } from "opencode-antigravity-auth/dist/src/plugin/storage.js";
+export {
+	getStoragePath,
+	loadAccounts,
+	saveAccounts,
+} from "opencode-antigravity-auth/dist/src/plugin/storage.js";
 export {
 	AntigravityTokenRefreshError,
 	refreshAccessToken,

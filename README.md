@@ -53,9 +53,20 @@ On V1 the upstream plugin reads its settings from `~/.config/opencode/antigravit
 [opencode-hooks-plugin](https://github.com/raultov/opencode-hooks-plugin), the dual entrypoint
 needs V1 1.18.29 or newer.
 
-Your existing setup keeps working as-is: both entrypoints use the same `~/.local/share/opencode/auth.json`
-credential and `~/.config/opencode/antigravity-accounts.json` account pool as the upstream plugin, so
-there is nothing to re-login.
+Your existing setup keeps working as-is: both entrypoints use the same
+`~/.config/opencode/antigravity-accounts.json` account pool as the upstream plugin, so there is
+nothing to re-login. On V2 the adapter needs no credential besides that pool. It still reads a
+V1 `~/.local/share/opencode/auth.json` entry when one exists.
+
+### Signing in
+
+Run `opencode auth login`, pick Google and choose **OAuth with Google (Antigravity)**. The same
+option appears when you connect Google from the TUI. Each sign-in adds the account to the pool,
+so repeat it to add more accounts.
+
+On V2 the redirect back to `localhost:51121` is detected automatically. Over SSH, in a dev
+container, or with `OPENCODE_HEADLESS` set, you paste the redirect URL or the code instead. The
+same happens when port 51121 is busy.
 
 To load a local build instead, run `bun install && bun run build` and point the entry at the
 `dist/` directory.
@@ -98,7 +109,8 @@ separate from the main Gemini quota on Pro plans, as reported by `agy`.
 
 This applies to V2 only. V1 runs the upstream plugin, so every upstream feature is there.
 
-Ported: account selection and rotation, proactive token refresh, quota/rate-limit bookkeeping,
+Ported: the OAuth sign-in that adds accounts to the pool, account selection and rotation,
+proactive token refresh, quota/rate-limit bookkeeping,
 Antigravity vs Gemini CLI quota routing (including model `:antigravity` / `:cli` suffixes),
 endpoint fallbacks on capacity errors, request rewriting (`cloudcode-pa.googleapis.com`, quota
 headers, thinking options) and streamed response transformation.
@@ -109,7 +121,9 @@ Gemini 4 Argon model alias described above, and the managed Cloud project resolu
 which preparation replaced with a synthetic project no subscription is attached to.
 
 Not yet ported: the `google_search` tool, the V1 `event` hook behaviours (image saving, debug
-thinking injection), thinking warmup requests, and TUI toasts (logged instead).
+thinking injection), thinking warmup requests, and TUI toasts (logged instead). The V1
+`opencode auth login` menu that lists, refreshes or replaces existing accounts is not ported
+either. V2 sign-ins only add accounts, as V1's `/connect` does.
 
 ## Development
 

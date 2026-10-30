@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import type { IntegrationMethodRegistration } from "@opencode/plugin/promise/integration";
 import type { Plugin } from "@opencode/plugin/promise/plugin";
 import { cliUserAgent } from "../src/identity.js";
 import AntigravityAuthModule, {
@@ -49,6 +50,7 @@ let managerStubMarks = 0;
 
 function setup() {
 	const hooks = new Map<string, HookHandler>();
+	const methods: IntegrationMethodRegistration[] = [];
 	const ctx = {
 		options: {},
 		session: {
@@ -57,12 +59,27 @@ function setup() {
 				return { dispose: async () => undefined };
 			},
 		},
+		integration: {
+			transform: async (
+				callback: (editor: {
+					method: { update: (input: IntegrationMethodRegistration) => void };
+				}) => void,
+			) => {
+				callback({ method: { update: (input) => methods.push(input) } });
+				return { dispose: async () => undefined };
+			},
+			connection: {
+				active: async () => undefined,
+				resolve: async () => undefined,
+			},
+		},
 	};
 	const overrides: Partial<PipelineDeps> = {
 		log: () => undefined,
 		readAuth: async () => freshAuth,
 		loadManager: async () => managerStub(),
 		refresh: async () => freshAuth,
+		projectContext: async (auth) => ({ auth, effectiveProjectId: "project" }),
 		prepare: (() => ({
 			request: "https://cloudcode-pa.googleapis.com/rewritten",
 			init: { method: "POST", headers: new Headers(), body: "{}" },
@@ -76,6 +93,7 @@ function setup() {
 	});
 	return {
 		hooks,
+		methods,
 		ctx: ctx as unknown as Parameters<Plugin["setup"]>[0],
 		plugin,
 	};
@@ -90,6 +108,17 @@ describe("AntigravityAuthV2", () => {
 			"http.response",
 			"retry",
 		]);
+	});
+
+	test("registers the Antigravity sign-in on the provider's integration", async () => {
+		const { methods, ctx, plugin } = setup();
+		await plugin.setup(ctx);
+		expect(methods).toHaveLength(1);
+		expect(methods[0]?.integrationID).toBe("google");
+		expect(methods[0]?.method).toMatchObject({
+			type: "oauth",
+			label: "OAuth with Google (Antigravity)",
+		});
 	});
 
 	test("rewrites managed google requests and leaves the rest alone", async () => {

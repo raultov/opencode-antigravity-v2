@@ -21,11 +21,17 @@
  */
 import { define, type Plugin } from "@opencode/plugin/promise/plugin";
 import { GoogleOAuthPlugin } from "opencode-antigravity-auth";
-import { readProviderAuth, writeProviderAuth } from "./auth-store.js";
+import { readActiveAuth, writeProviderAuth } from "./auth-store.js";
 import {
 	migrateFingerprintsToCliUserAgent,
 	rewriteRequestModel,
 } from "./identity.js";
+import {
+	addAccountToPool,
+	isRemoteSession,
+	type LoginDeps,
+	loginMethod,
+} from "./login.js";
 import {
 	buildManagedRequest,
 	type LogLevel,
@@ -36,12 +42,17 @@ import {
 } from "./pipeline.js";
 import {
 	AccountManager,
+	authorizeAntigravity,
 	ensureProjectContext,
+	exchangeAntigravity,
 	getStoragePath,
 	isGenerativeLanguageRequest,
+	loadAccounts,
 	type OAuthAuthDetails,
 	prepareAntigravityRequest,
 	refreshAccessToken,
+	saveAccounts,
+	startOAuthListener,
 	transformAntigravityResponse,
 } from "./upstream.js";
 
@@ -67,6 +78,7 @@ export type AntigravityV2Options = Record<string, unknown>;
 export function createAntigravityAuthV2(
 	overrides: Partial<PipelineDeps> & {
 		transform?: typeof transformAntigravityResponse;
+		login?: Partial<LoginDeps>;
 	} = {},
 ): Plugin {
 	return define({
@@ -101,10 +113,17 @@ export function createAntigravityAuthV2(
 				},
 			};
 
+			const {
+				login: loginOverrides,
+				transform,
+				...pipelineOverrides
+			} = overrides;
 			const deps: PipelineDeps = {
 				log,
 				readAuth: async (providerID) =>
-					readProviderAuth(providerID) as OAuthAuthDetails | undefined,
+					(await readActiveAuth(ctx.integration.connection, providerID)) as
+						| OAuthAuthDetails
+						| undefined,
 				loadManager: async (auth) => AccountManager.loadFromDisk(auth),
 				refresh: (auth) =>
 					refreshAccessToken(auth, client, settings.providerID),
@@ -112,8 +131,25 @@ export function createAntigravityAuthV2(
 				prepare: prepareAntigravityRequest,
 				now: Date.now,
 				sleep: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
-				...overrides,
+				...pipelineOverrides,
 			};
+
+			// V2 has no V1 `auth` hook: the sign-in flow is an OAuth method on the
+			// provider's integration, which `opencode auth login` and the TUI list.
+			const loginDeps: LoginDeps = {
+				authorize: authorizeAntigravity,
+				exchange: exchangeAntigravity,
+				startListener: () => startOAuthListener(),
+				addAccount: (result) =>
+					addAccountToPool(result, { load: loadAccounts, save: saveAccounts }),
+				refresh: deps.refresh,
+				remote: () => isRemoteSession(),
+				now: Date.now,
+				...loginOverrides,
+			};
+			void ctx.integration.transform((editor) => {
+				editor.method.update(loginMethod(settings.providerID, loginDeps));
+			});
 
 			const metaByRequest = new WeakMap<Request, ManagedRequestMeta>();
 			const metaBySession = new Map<string, ManagedRequestMeta>();
@@ -165,9 +201,7 @@ export function createAntigravityAuthV2(
 					retryBySession.delete(sessionID);
 				}
 
-				event.response = await (
-					overrides.transform ?? transformAntigravityResponse
-				)(
+				event.response = await (transform ?? transformAntigravityResponse)(
 					event.response,
 					meta.streaming,
 					undefined,

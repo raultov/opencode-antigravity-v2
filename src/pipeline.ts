@@ -81,7 +81,8 @@ export type PipelineDeps = {
 		extra?: Record<string, unknown>,
 	) => void;
 	readAuth: (providerID: string) => Promise<OAuthAuthDetails | undefined>;
-	loadManager: (auth: OAuthAuthDetails) => Promise<ManagerLike>;
+	/** Loads the account pool; the credential seeds it when the pool is empty. */
+	loadManager: (auth: OAuthAuthDetails | undefined) => Promise<ManagerLike>;
 	refresh: (auth: OAuthAuthDetails) => Promise<OAuthAuthDetails | undefined>;
 	/**
 	 * Resolves the Cloud project the account is entitled to. The upstream fetch
@@ -156,8 +157,10 @@ export function endpointFor(
  * Builds the outbound request for one Generative Language API call.
  *
  * Returns undefined when the request is not managed here: not a Generative
- * Language URL, or opencode holds no OAuth credential to derive accounts from
- * (the request then falls through to opencode's own auth).
+ * Language URL, or opencode holds a non-OAuth credential such as an API key
+ * (the request then falls through to opencode's own auth). Without any
+ * credential the account pool alone is used, and an empty pool is an error
+ * that says how to sign in.
  */
 export async function buildManagedRequest(
 	original: Request,
@@ -171,7 +174,8 @@ export async function buildManagedRequest(
 	const urlString = rewriteModelAliasInUrl(original.url);
 	if (!isGenerativeLanguageRequest(urlString)) return undefined;
 	const auth = await deps.readAuth(settings.providerID);
-	if (auth?.type !== "oauth" || !auth.refresh) return undefined;
+	if (auth && auth.type !== "oauth") return undefined;
+	const seed = auth?.refresh ? auth : undefined;
 
 	const family =
 		urlString.includes("/claude") ||
@@ -183,10 +187,10 @@ export async function buildManagedRequest(
 		cli_first: settings.cliFirst,
 	});
 
-	const manager = await deps.loadManager(auth);
+	const manager = await deps.loadManager(seed);
 	if (manager.getAccountCount() === 0) {
 		throw new Error(
-			"No Antigravity accounts configured. Run `opencode auth login`.",
+			"No Antigravity accounts configured. Run `opencode auth login` and choose OAuth with Google (Antigravity).",
 		);
 	}
 

@@ -2,7 +2,11 @@ import { beforeEach, describe, expect, test } from "bun:test";
 import { mkdir, mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { readProviderAuth, writeProviderAuth } from "../src/auth-store.js";
+import {
+	readActiveAuth,
+	readProviderAuth,
+	writeProviderAuth,
+} from "../src/auth-store.js";
 import {
 	buildManagedRequest,
 	endpointFor,
@@ -131,7 +135,7 @@ describe("buildManagedRequest", () => {
 		expect(result).toBeUndefined();
 	});
 
-	test("ignores requests when opencode holds no OAuth credential", async () => {
+	test("ignores requests when opencode holds a non-OAuth credential", async () => {
 		const d = deps({
 			readAuth: async () =>
 				({ type: "api", key: "k" }) as unknown as OAuthAuthDetails,
@@ -139,6 +143,31 @@ describe("buildManagedRequest", () => {
 		expect(
 			await buildManagedRequest(new Request(URL), d, SETTINGS),
 		).toBeUndefined();
+	});
+
+	test("uses the account pool when opencode holds no credential", async () => {
+		const seeds: unknown[] = [];
+		const d = deps({
+			readAuth: async () => undefined,
+			loadManager: async (auth) => {
+				seeds.push(auth);
+				return manager([account]);
+			},
+		});
+		expect(
+			await buildManagedRequest(new Request(URL), d, SETTINGS),
+		).toBeDefined();
+		expect(seeds).toEqual([undefined]);
+	});
+
+	test("tells the user how to sign in when there are no accounts", async () => {
+		const d = deps({
+			readAuth: async () => undefined,
+			loadManager: async () => ({ ...manager([]), getAccountCount: () => 0 }),
+		});
+		await expect(
+			buildManagedRequest(new Request(URL), d, SETTINGS),
+		).rejects.toThrow("opencode auth login");
 	});
 
 	test("prepares the request with the selected account's token", async () => {
@@ -344,5 +373,76 @@ describe("auth store", () => {
 		expect(
 			readProviderAuth("google", join(path, "missing.json")),
 		).toBeUndefined();
+	});
+});
+
+describe("readActiveAuth", () => {
+	const v1 = () => ({ type: "oauth", refresh: "v1-refresh" });
+
+	function reader(
+		active: unknown,
+		value: unknown,
+	): Parameters<typeof readActiveAuth>[0] {
+		return {
+			active: async () => active,
+			resolve: async () => value,
+		} as unknown as Parameters<typeof readActiveAuth>[0];
+	}
+
+	test("prefers the active V2 OAuth credential", async () => {
+		const auth = await readActiveAuth(
+			reader(
+				{ type: "credential", id: "c", label: "l", method: "oauth" },
+				{
+					type: "oauth",
+					methodID: "antigravity",
+					refresh: "v2-refresh",
+					access: "a",
+					expires: 5,
+				},
+			),
+			"google",
+			v1,
+		);
+		expect(auth).toEqual({
+			type: "oauth",
+			refresh: "v2-refresh",
+			access: "a",
+			expires: 5,
+		});
+	});
+
+	test("reports V2 key and environment connections as non-OAuth", async () => {
+		const key = await readActiveAuth(
+			reader(
+				{ type: "credential", id: "c", label: "l", method: "key" },
+				{ type: "key", key: "secret" },
+			),
+			"google",
+			v1,
+		);
+		expect(key).toEqual({ type: "key" });
+		const env = await readActiveAuth(
+			reader({ type: "env", name: "GEMINI_API_KEY" }, undefined),
+			"google",
+			v1,
+		);
+		expect(env).toEqual({ type: "env" });
+	});
+
+	test("falls back to the V1 auth.json entry", async () => {
+		expect(
+			(await readActiveAuth(reader(undefined, undefined), "google", v1))
+				?.refresh,
+		).toBe("v1-refresh");
+		const failing = {
+			active: async () => {
+				throw new Error("no integration");
+			},
+			resolve: async () => undefined,
+		} as unknown as Parameters<typeof readActiveAuth>[0];
+		expect((await readActiveAuth(failing, "google", v1))?.refresh).toBe(
+			"v1-refresh",
+		);
 	});
 });
