@@ -105,6 +105,16 @@ stored fingerprints before the pool loads and rewrites the model id in the
 requests before delegating to the upstream fetch. The Gemini 4 Argon quota is
 separate from the main Gemini quota on Pro plans, as reported by `agy`.
 
+## Gemini 3.x Flash
+
+Versioned Gemini 3 flash models (`gemini-3.8-flash`) are served only under their tiered
+ids (`gemini-3.8-flash-low|medium|high`); the bare id gets a 404. The older
+`gemini-3-flash` is the opposite: bare id plus `thinkingLevel`. The upstream resolver
+treats both the same way and always strips the tier, so on V2 the adapter restores it
+after request preparation, taking the tier from the thinking level that goes on the wire
+(variants included) and falling back to `-low`. This fix is V2 only: on V1 the upstream
+fetch prepares and sends the request itself, so there is no point to rewrite it.
+
 ## What is and is not ported
 
 This applies to V2 only. V1 runs the upstream plugin, so every upstream feature is there.

@@ -15,7 +15,11 @@ import {
 	type PipelineSettings,
 	settingsFrom,
 } from "../src/pipeline.js";
-import type { ManagedAccount, OAuthAuthDetails } from "../src/upstream.js";
+import {
+	type ManagedAccount,
+	type OAuthAuthDetails,
+	prepareAntigravityRequest,
+} from "../src/upstream.js";
 
 const SETTINGS: PipelineSettings = {
 	providerID: "google",
@@ -215,6 +219,64 @@ describe("buildManagedRequest", () => {
 		expect(String(d.prepared[0]?.[0])).toContain(
 			"/models/gemini-4-argon-high:",
 		);
+	});
+
+	test("sends versioned Gemini 3 flash under the tier of its thinking level", async () => {
+		const d = deps({
+			prepare: (() => ({
+				request:
+					"https://daily-cloudcode-pa.sandbox.googleapis.com/v1internal:streamGenerateContent?alt=sse",
+				init: {
+					method: "POST",
+					body: JSON.stringify({
+						project: "aicode-consumers",
+						model: "gemini-3.8-flash",
+						request: {
+							generationConfig: { thinkingConfig: { thinkingLevel: "medium" } },
+						},
+					}),
+				},
+				streaming: true,
+				effectiveModel: "gemini-3.8-flash",
+			})) as unknown as PipelineDeps["prepare"],
+		});
+		const request = new Request(
+			"https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash:streamGenerateContent",
+			{ method: "POST", body: "{}" },
+		);
+		const built = await buildManagedRequest(request, d, SETTINGS);
+		const body = JSON.parse((await built?.request.text()) ?? "{}");
+		expect(body.model).toBe("gemini-3.8-flash-medium");
+		expect(built?.meta.effectiveModel).toBe("gemini-3.8-flash-medium");
+	});
+
+	test("tiers versioned Gemini 3 flash through the real request preparation", async () => {
+		const d = deps({ prepare: prepareAntigravityRequest });
+		const cases: Array<[string, unknown, string]> = [
+			["gemini-3.8-flash", undefined, "gemini-3.8-flash-low"],
+			[
+				"gemini-3.8-flash",
+				{ thinkingConfig: { thinkingLevel: "high" } },
+				"gemini-3.8-flash-high",
+			],
+			["gemini-3.8-flash-medium", undefined, "gemini-3.8-flash-medium"],
+			["gemini-3-flash", undefined, "gemini-3-flash"],
+		];
+		for (const [model, generationConfig, expected] of cases) {
+			const request = new Request(
+				`https://generativelanguage.googleapis.com/v1beta/models/${model}:streamGenerateContent`,
+				{
+					method: "POST",
+					body: JSON.stringify({
+						contents: [{ role: "user", parts: [{ text: "hi" }] }],
+						generationConfig,
+					}),
+				},
+			);
+			const built = await buildManagedRequest(request, d, SETTINGS);
+			const body = JSON.parse((await built?.request.text()) ?? "{}");
+			expect(body.model).toBe(expected);
+		}
 	});
 
 	test("prepares the request with the CLI User-Agent identity", async () => {

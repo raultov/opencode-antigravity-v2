@@ -10,7 +10,8 @@
  *
  * The second half of the problem is the model id: the CLI addresses Argon by
  * its tiered ids (`gemini-4-argon-low|medium|high`) and the bare
- * `gemini-4-argon` opencode lists is not a valid id at all.
+ * `gemini-4-argon` opencode lists is not a valid id at all. Versioned Gemini 3
+ * flash models (`gemini-3.8-flash`) have the same requirement.
  */
 import { readFile, rename, writeFile } from "node:fs/promises";
 import { getAntigravityVersion } from "opencode-antigravity-auth/dist/src/constants.js";
@@ -22,6 +23,17 @@ import { getAntigravityVersion } from "opencode-antigravity-auth/dist/src/consta
 const MODEL_ALIASES: Record<string, string> = {
 	"gemini-4-argon": "gemini-4-argon-medium",
 };
+
+/**
+ * Gemini 3 flash models with a minor version (`gemini-3.8-flash`). Unlike
+ * `gemini-3-flash`, which the backend serves under its bare id plus a
+ * `thinkingLevel`, these are only served under a tiered id; the bare one
+ * answers 404.
+ */
+const VERSIONED_GEMINI_3_FLASH = /^gemini-3\.\d+-flash$/i;
+
+/** Tier suffixes the backend serves for versioned Gemini 3 flash models. */
+const FLASH_TIERS = new Set(["low", "medium", "high"]);
 
 /** Prefix the backend recognises as the Antigravity CLI client. */
 const CLI_UA_PREFIX = "antigravity/cli/";
@@ -45,6 +57,58 @@ export function rewriteModelAliasInUrl(urlString: string): string {
 		/\/models\/([^:/?]+)/,
 		(_match, model: string) => `/models/${resolveModelAlias(model)}`,
 	);
+}
+
+/**
+ * Maps a versioned Gemini 3 flash id onto the tiered id the backend serves,
+ * picking the tier from the thinking level the request carries. Levels the
+ * backend has no tier for (`minimal`, or none at all) fall back to `low`, the
+ * upstream default for Gemini 3. Every other model passes through unchanged.
+ */
+export function tierVersionedFlashModel(
+	model: string,
+	thinkingLevel: unknown,
+): string {
+	if (!VERSIONED_GEMINI_3_FLASH.test(model)) return model;
+	const level =
+		typeof thinkingLevel === "string" ? thinkingLevel.toLowerCase() : "";
+	return `${model}-${FLASH_TIERS.has(level) ? level : "low"}`;
+}
+
+/**
+ * Applies `tierVersionedFlashModel` to a prepared (Antigravity-wrapped)
+ * request body.
+ *
+ * The upstream resolver strips the tier off every Gemini 3 flash id, which is
+ * right for `gemini-3-flash` but sends `gemini-3.8-flash` bare. The tier is
+ * restored here, after preparation, so it follows the thinking level that
+ * actually goes on the wire, variant overrides included.
+ *
+ * Returns undefined when the body is not a wrapped request or its model needs
+ * no tier.
+ */
+export function tierVersionedFlashBody(
+	body: unknown,
+): { body: string; model: string } | undefined {
+	if (typeof body !== "string" || body.length === 0) return undefined;
+	let wrapped: {
+		model?: unknown;
+		request?: {
+			generationConfig?: { thinkingConfig?: { thinkingLevel?: unknown } };
+		};
+	};
+	try {
+		wrapped = JSON.parse(body) as typeof wrapped;
+	} catch {
+		return undefined;
+	}
+	if (typeof wrapped?.model !== "string") return undefined;
+	const model = tierVersionedFlashModel(
+		wrapped.model,
+		wrapped.request?.generationConfig?.thinkingConfig?.thinkingLevel,
+	);
+	if (model === wrapped.model) return undefined;
+	return { body: JSON.stringify({ ...wrapped, model }), model };
 }
 
 /**

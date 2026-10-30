@@ -10,6 +10,8 @@ import {
 	resolveModelAlias,
 	rewriteModelAliasInUrl,
 	rewriteRequestModel,
+	tierVersionedFlashBody,
+	tierVersionedFlashModel,
 } from "../src/identity.js";
 
 describe("resolveModelAlias", () => {
@@ -62,6 +64,70 @@ describe("rewriteModelAliasInUrl", () => {
 		const rewritten = rewriteRequestModel(input) as Request;
 		expect(rewritten.url).toContain("/models/gemini-4-argon-medium:");
 		expect(rewritten.method).toBe("POST");
+	});
+});
+
+describe("tierVersionedFlashModel", () => {
+	test("tiers a versioned flash id by its thinking level", () => {
+		expect(tierVersionedFlashModel("gemini-3.8-flash", "high")).toBe(
+			"gemini-3.8-flash-high",
+		);
+		expect(tierVersionedFlashModel("gemini-3.8-flash", "MEDIUM")).toBe(
+			"gemini-3.8-flash-medium",
+		);
+	});
+
+	test("falls back to low when the level has no tier", () => {
+		expect(tierVersionedFlashModel("gemini-3.8-flash", undefined)).toBe(
+			"gemini-3.8-flash-low",
+		);
+		expect(tierVersionedFlashModel("gemini-3.8-flash", "minimal")).toBe(
+			"gemini-3.8-flash-low",
+		);
+	});
+
+	test("leaves every other model alone", () => {
+		for (const id of [
+			"gemini-3-flash",
+			"gemini-3.8-flash-medium",
+			"gemini-3.8-flash-preview",
+			"gemini-3.1-pro-low",
+			"gemini-4-argon-medium",
+		]) {
+			expect(tierVersionedFlashModel(id, "high")).toBe(id);
+		}
+	});
+});
+
+describe("tierVersionedFlashBody", () => {
+	const wrapped = (model: string, thinkingLevel?: string) =>
+		JSON.stringify({
+			project: "p",
+			model,
+			request: {
+				contents: [],
+				generationConfig: { thinkingConfig: { thinkingLevel } },
+			},
+		});
+
+	test("rewrites only the model of a wrapped body", () => {
+		const tiered = tierVersionedFlashBody(wrapped("gemini-3.8-flash", "high"));
+		expect(tiered?.model).toBe("gemini-3.8-flash-high");
+		const body = JSON.parse(tiered?.body ?? "{}");
+		expect(body.model).toBe("gemini-3.8-flash-high");
+		expect(body.project).toBe("p");
+		expect(body.request.generationConfig.thinkingConfig.thinkingLevel).toBe(
+			"high",
+		);
+	});
+
+	test("returns undefined when nothing needs a tier", () => {
+		expect(tierVersionedFlashBody(wrapped("gemini-3-flash", "low"))).toBe(
+			undefined,
+		);
+		expect(tierVersionedFlashBody("not json")).toBeUndefined();
+		expect(tierVersionedFlashBody(undefined)).toBeUndefined();
+		expect(tierVersionedFlashBody("{}")).toBeUndefined();
 	});
 });
 

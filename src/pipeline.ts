@@ -8,7 +8,11 @@
  * request and the metadata the response hook needs, and the retry policy is
  * applied through the `retry` hook.
  */
-import { cliFingerprint, rewriteModelAliasInUrl } from "./identity.js";
+import {
+	cliFingerprint,
+	rewriteModelAliasInUrl,
+	tierVersionedFlashBody,
+} from "./identity.js";
 import {
 	ANTIGRAVITY_ENDPOINT_FALLBACKS,
 	type AntigravityConfig,
@@ -331,10 +335,13 @@ export async function buildManagedRequest(
 		},
 	);
 
-	const request = new Request(
-		prepared.request as RequestInfo,
-		prepared.init as RequestInit,
-	);
+	// `gemini-3.8-flash` and its siblings need a tiered id that preparation
+	// strips; it is restored from the thinking level preparation settled on.
+	const tiered = tierVersionedFlashBody(prepared.init?.body);
+	const request = new Request(prepared.request as RequestInfo, {
+		...(prepared.init as RequestInit),
+		...(tiered ? { body: tiered.body } : {}),
+	});
 	return {
 		request,
 		meta: {
@@ -348,7 +355,7 @@ export async function buildManagedRequest(
 			streaming: Boolean(prepared.streaming),
 			requestedModel: prepared.requestedModel,
 			projectId: prepared.projectId,
-			effectiveModel: prepared.effectiveModel,
+			effectiveModel: tiered?.model ?? prepared.effectiveModel,
 			sessionId: prepared.sessionId,
 			toolDebugMissing: prepared.toolDebugMissing,
 			toolDebugSummary: prepared.toolDebugSummary,
