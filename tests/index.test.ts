@@ -50,6 +50,12 @@ function managerStub() {
 let managerStubMarks = 0;
 const managerStubDelays: number[] = [];
 
+/** The decision opencode hands the retry hook before any plugin speaks. */
+const OPENCODE_DEFAULT_DECISION = (): { retry: boolean; delay?: number } => ({
+	retry: true,
+	delay: 2_000,
+});
+
 function setup() {
 	const hooks = new Map<string, HookHandler>();
 	const methods: IntegrationMethodRegistration[] = [];
@@ -251,15 +257,60 @@ describe("AntigravityAuthV2", () => {
 		await hooks.get("http.request")?.(event);
 		await hooks.get("http.response")?.(event);
 
+		// opencode's own decision is to retry; the adapter has to overrule it.
 		const retry = {
 			sessionID: "s1",
 			model: { providerID: "google", id: "m" },
 			error: {},
 			attempt: 1,
-			decision: { retry: false },
+			decision: OPENCODE_DEFAULT_DECISION(),
 		};
 		await hooks.get("retry")?.(retry);
-		expect(retry.decision.retry).toBe(false);
+		expect(retry.decision).toEqual({ retry: false });
+	});
+
+	test("does not retry or book a 429 that names no wait", async () => {
+		managerStubMarks = 0;
+		const { hooks, ctx, plugin } = setup();
+		await plugin.setup(ctx);
+
+		// What the backend answers when it refuses a request outright: no
+		// RetryInfo, no quotaResetDelay, no Retry-After.
+		const event = {
+			sessionID: "s1",
+			model: { providerID: "google", id: "m" },
+			request: new Request(URL),
+			response: new Response(
+				JSON.stringify({
+					error: {
+						code: 429,
+						message: "Resource has been exhausted (e.g. check quota).",
+						status: "RESOURCE_EXHAUSTED",
+					},
+				}),
+				{ status: 429, headers: { "content-type": "text/event-stream" } },
+			),
+		};
+		await hooks.get("http.request")?.(event);
+		await hooks.get("http.response")?.(event);
+		// Booking it would make the next request fall back to Gemini CLI quota.
+		expect(managerStubMarks).toBe(0);
+		const body = JSON.parse(await event.response.text());
+		expect(body.error.message).toContain(
+			"Resource has been exhausted (e.g. check quota).",
+		);
+		expect(body.error.message).toContain("without a retry delay");
+		expect(event.response.status).toBe(429);
+
+		const retry = {
+			sessionID: "s1",
+			model: { providerID: "google", id: "m" },
+			error: {},
+			attempt: 1,
+			decision: OPENCODE_DEFAULT_DECISION(),
+		};
+		await hooks.get("retry")?.(retry);
+		expect(retry.decision).toEqual({ retry: false });
 	});
 
 	test("does not retry past the adapter's attempt budget", async () => {
@@ -274,7 +325,10 @@ describe("AntigravityAuthV2", () => {
 		await hooks.get("http.request")?.(request);
 		await hooks.get("http.response")?.({
 			...request,
-			response: new Response("{}", { status: 429 }),
+			response: new Response("{}", {
+				status: 429,
+				headers: { "retry-after": "1" },
+			}),
 		});
 
 		for (let attempt = 1; attempt <= 5; attempt++) {
@@ -283,11 +337,12 @@ describe("AntigravityAuthV2", () => {
 				model: { providerID: "google", id: "m" },
 				error: {},
 				attempt,
-				decision: { retry: false },
+				decision: OPENCODE_DEFAULT_DECISION(),
 			};
 			await hooks.get("retry")?.(retry);
-			if (attempt <= 3) expect(retry.decision.retry).toBe(true);
-			else expect(retry.decision.retry).toBe(false);
+			if (attempt <= 3)
+				expect(retry.decision).toEqual({ retry: true, delay: 1_000 });
+			else expect(retry.decision).toEqual({ retry: false });
 		}
 	});
 
@@ -303,7 +358,10 @@ describe("AntigravityAuthV2", () => {
 		await hooks.get("http.request")?.(base);
 		await hooks.get("http.response")?.({
 			...base,
-			response: new Response("{}", { status: 429 }),
+			response: new Response("{}", {
+				status: 429,
+				headers: { "retry-after": "1" },
+			}),
 		});
 		await hooks.get("http.request")?.(base);
 		await hooks.get("http.response")?.({

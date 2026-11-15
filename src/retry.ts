@@ -101,23 +101,74 @@ export function retryAfterMs(
 	return headerRetryMs(response) ?? fallback;
 }
 
+/** The body of a response, read from a clone so the original stays readable. */
+async function peekText(response: Response): Promise<string> {
+	try {
+		return await response.clone().text();
+	} catch {
+		return "";
+	}
+}
+
 /**
- * The wait a retryable response asks for, body first, headers second.
+ * The wait a retryable response names, body first, headers second, or
+ * undefined when it names none.
  *
- * The body is cloned so the response keeps streaming to opencode and to the
- * response transformer untouched.
+ * Antigravity's capacity limits always name their wait. A 429 that names
+ * none is the backend refusing the request itself (it answers the same
+ * "Resource has been exhausted (e.g. check quota)." to a request whose
+ * content it rejects), so retrying it only burns time.
  */
+export async function serverRetryHint(
+	response: Response,
+): Promise<number | undefined> {
+	const text = await peekText(response);
+	const fromBody = text.length > 0 ? bodyRetryMs(text) : undefined;
+	if (fromBody !== undefined) return Math.max(fromBody, 0);
+	return headerRetryMs(response);
+}
+
+/** The wait a retryable response asks for, with a default when it names none. */
 export async function serverRetryMs(
 	response: Response,
 	fallback = DEFAULT_RETRY_AFTER_MS,
 ): Promise<number> {
-	let text = "";
+	return (await serverRetryHint(response)) ?? fallback;
+}
+
+/** What the user is told about a 429 the adapter will not retry. */
+const UNHINTED_RATE_LIMIT_NOTE =
+	"\n\nAntigravity answered 429 without a retry delay. Its capacity limits always name one, " +
+	"so this is the backend refusing the request rather than a quota running out: it was not " +
+	"retried and the account was not marked rate-limited. Retrying the same request will fail the same way.";
+
+/**
+ * Returns the response with its error message explaining why it was not
+ * retried. A body that is not a JSON error is returned as it was.
+ */
+export async function explainUnhintedRateLimit(
+	response: Response,
+): Promise<Response> {
+	const text = await peekText(response);
+	let parsed: unknown;
 	try {
-		text = await response.clone().text();
+		parsed = JSON.parse(text);
 	} catch {
-		text = "";
+		return response;
 	}
-	const fromBody = text.length > 0 ? bodyRetryMs(text) : undefined;
-	if (fromBody !== undefined) return Math.max(fromBody, 0);
-	return retryAfterMs(response, fallback);
+	if (!isRecord(parsed) || !isRecord(parsed.error)) return response;
+	const message =
+		typeof parsed.error.message === "string" ? parsed.error.message : "";
+	const body = {
+		...parsed,
+		error: { ...parsed.error, message: message + UNHINTED_RATE_LIMIT_NOTE },
+	};
+	const headers = new Headers(response.headers);
+	// The body changes length; a copied length would truncate or stall it.
+	headers.delete("content-length");
+	return new Response(JSON.stringify(body), {
+		status: response.status,
+		statusText: response.statusText,
+		headers,
+	});
 }

@@ -156,6 +156,14 @@ account against that wait and retries after it. A wait longer than
 `max_rate_limit_wait_seconds` is not retried at all: the turn fails with the backend's message
 instead of stalling through it.
 
+A 429 that names **no** wait at all (`"Resource has been exhausted (e.g. check quota)."`, with
+no `details` and no `Retry-After`) is not a capacity limit: the backend answers it to requests it
+refuses outright, and every retry fails the same way. The adapter does not retry it and does not
+mark the account rate-limited (which would otherwise push the next request onto Gemini CLI quota,
+where an account without a Gemini Code Assist licence gets `403 SUBSCRIPTION_REQUIRED`). The error
+shown in opencode carries a note saying so. See `UPSTREAM.md` §6 for the one cause identified so
+far.
+
 ## What is and is not ported
 
 This applies to V2 only. V1 runs the upstream plugin, so every upstream feature is there.

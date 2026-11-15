@@ -40,7 +40,11 @@ import {
 	type PipelineSettings,
 	settingsFrom,
 } from "./pipeline.js";
-import { serverRetryMs } from "./retry.js";
+import {
+	DEFAULT_RETRY_AFTER_MS,
+	explainUnhintedRateLimit,
+	serverRetryHint,
+} from "./retry.js";
 import {
 	AccountManager,
 	authorizeAntigravity,
@@ -62,7 +66,13 @@ export { retryAfterMs } from "./retry.js";
 const RETRYABLE_STATUSES = new Set([429, 503, 529]);
 const MAX_ADAPTER_RETRIES = 3;
 
-type RetryState = { attempts: number; delayMs: number; endpointIndex: number };
+type RetryState = {
+	attempts: number;
+	delayMs: number;
+	endpointIndex: number;
+	/** The backend refused the request outright; retrying cannot help. */
+	refused: boolean;
+};
 
 export type AntigravityV2Options = Record<string, unknown>;
 
@@ -171,10 +181,29 @@ export function createAntigravityAuthV2(
 				if (!meta) return;
 
 				const status = event.response.status;
-				if (RETRYABLE_STATUSES.has(status)) {
+				const hintMs = RETRYABLE_STATUSES.has(status)
+					? await serverRetryHint(event.response)
+					: undefined;
+				if (status === 429 && hintMs === undefined) {
+					// Antigravity's capacity limits always name their wait. A 429 that
+					// names none is a refusal of this request: booking it would push the
+					// next request onto Gemini CLI quota, and retrying repeats it.
+					const previous = retryBySession.get(sessionID);
+					retryBySession.set(sessionID, {
+						attempts: previous?.attempts ?? 0,
+						delayMs: 0,
+						endpointIndex: meta.endpointIndex,
+						refused: true,
+					});
+					log(
+						"warn",
+						"Antigravity answered 429 without a retry delay; not retrying and not marking the account rate-limited",
+					);
+					event.response = await explainUnhintedRateLimit(event.response);
+				} else if (RETRYABLE_STATUSES.has(status)) {
 					// Antigravity states the wait in the body, usually well under a
 					// second; a fixed default would turn a capacity blip into a stall.
-					const delayMs = await serverRetryMs(event.response);
+					const delayMs = hintMs ?? DEFAULT_RETRY_AFTER_MS;
 					meta.manager.markRateLimited(
 						meta.account,
 						delayMs,
@@ -191,6 +220,7 @@ export function createAntigravityAuthV2(
 						// limits stay put and rotate the account instead.
 						endpointIndex:
 							status === 429 ? meta.endpointIndex : meta.endpointIndex + 1,
+						refused: false,
 					});
 				} else if (status >= 200 && status < 300) {
 					retryBySession.delete(sessionID);
@@ -215,10 +245,20 @@ export function createAntigravityAuthV2(
 			void ctx.session.hook("retry", (event) => {
 				const sessionID = String(event.sessionID);
 				const state = retryBySession.get(sessionID);
-				if (!state || state.attempts >= MAX_ADAPTER_RETRIES) return;
-				// A wait longer than the caller's budget is a quota that will not come
-				// back for this turn: fail now instead of stalling for minutes.
-				if (state.delayMs > settings.maxWaitMs) return;
+				// Errors the adapter did not see keep opencode's own decision.
+				if (!state) return;
+				// opencode's default decision is to retry, so every case the adapter
+				// rules out has to be refused explicitly: a refused request, a spent
+				// attempt budget, and a wait longer than the caller's budget (a quota
+				// that will not come back this turn).
+				if (
+					state.refused ||
+					state.attempts >= MAX_ADAPTER_RETRIES ||
+					state.delayMs > settings.maxWaitMs
+				) {
+					event.decision = { retry: false };
+					return;
+				}
 				state.attempts += 1;
 				event.decision = { retry: true, delay: state.delayMs };
 				log(

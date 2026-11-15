@@ -148,6 +148,37 @@ tier and fills in `low`, so a client asking for `high` silently runs cheap. The
 catalog also shows `gemini-3.6-flash-*` and `gemini-3.1-pro-*` are gone: every
 id variant of them answers 404, so a config advertising them cannot work.
 
+## 6. Some system prompts are refused with a 429 that names no wait
+
+Requests to `daily-cloudcode-pa.sandbox.googleapis.com` whose `systemInstruction` contains the
+text `tools.opencode.session_move` (case-insensitive) are answered, every time, with:
+
+```
+429 {"error":{"code":429,"message":"Resource has been exhausted (e.g. check quota).",
+              "status":"RESOURCE_EXHAUSTED"}}
+```
+
+There are no `details`, no `RetryInfo` and no `Retry-After`, while `fetchAvailableModels`
+reports the model's `remainingFraction` near 1. Verified on 2026-11-15 with
+`gemini-3.8-flash-tiered`:
+
+| Text in `systemInstruction` | Status |
+| --- | --- |
+| `tools.opencode.session_move`, `Tools.Opencode.session_move` | 429 |
+| `tools.opencode.worktree_create`, `tools.opencode.foo`, `opencode`, `session_move` | 200 |
+| `tools.claude.session_move`, `tools.opencode_session_move` | 200 |
+| `tools.opencode.session_move` in the **user** message instead | 200 |
+
+opencode V2 puts that text in every system prompt: its built-in `opencode.tools` plugin pushes a
+worktree hint naming it on every turn, and `session_move` is a pinned Code Mode tool listed in the
+`execute` catalog. Neither depends on configuration (MCP `codemode: false` does not remove them),
+so every opencode V2 session with this backend is refused. Removing the two occurrences from an
+otherwise identical captured request makes it succeed.
+
+Whether this is a deliberate filter on third-party clients is not known. This adapter does not
+rewrite the prompt to get around it; it only stops treating the answer as a rate limit (no retry,
+no rate-limit booking, an explanatory note on the error).
+
 ## Not a factor
 
 Verified not to matter for Argon access, so no change is needed for them:

@@ -3,8 +3,10 @@ import {
 	bodyRetryMs,
 	DEFAULT_RETRY_AFTER_MS,
 	durationToMs,
+	explainUnhintedRateLimit,
 	headerRetryMs,
 	retryAfterMs,
+	serverRetryHint,
 	serverRetryMs,
 } from "../src/retry.js";
 
@@ -113,6 +115,72 @@ describe("headerRetryMs", () => {
 describe("retryAfterMs", () => {
 	test("keeps the V1 fetch's default when the server names nothing", () => {
 		expect(retryAfterMs(new Response("{}"))).toBe(DEFAULT_RETRY_AFTER_MS);
+	});
+});
+
+describe("serverRetryHint", () => {
+	test("reads the body first and the header second", async () => {
+		expect(
+			await serverRetryHint(
+				new Response(capacityBody("900ms", "0.5s"), {
+					status: 429,
+					headers: { "retry-after": "60" },
+				}),
+			),
+		).toBe(500);
+		expect(
+			await serverRetryHint(
+				new Response("{}", { status: 429, headers: { "retry-after": "3" } }),
+			),
+		).toBe(3_000);
+	});
+
+	test("returns undefined when the response names no wait at all", async () => {
+		const refused = JSON.stringify({
+			error: {
+				code: 429,
+				message: "Resource has been exhausted (e.g. check quota).",
+				status: "RESOURCE_EXHAUSTED",
+			},
+		});
+		expect(
+			await serverRetryHint(new Response(refused, { status: 429 })),
+		).toBeUndefined();
+		expect(
+			await serverRetryHint(new Response("", { status: 429 })),
+		).toBeUndefined();
+	});
+});
+
+describe("explainUnhintedRateLimit", () => {
+	test("appends the explanation and keeps status and headers", async () => {
+		const response = new Response(
+			JSON.stringify({
+				error: {
+					code: 429,
+					message: "Resource has been exhausted (e.g. check quota).",
+					status: "RESOURCE_EXHAUSTED",
+				},
+			}),
+			{ status: 429, headers: { "content-type": "text/event-stream" } },
+		);
+		const explained = await explainUnhintedRateLimit(response);
+		expect(explained.status).toBe(429);
+		expect(explained.headers.get("content-type")).toBe("text/event-stream");
+		const body = JSON.parse(await explained.text());
+		expect(body.error.status).toBe("RESOURCE_EXHAUSTED");
+		expect(body.error.message).toStartWith(
+			"Resource has been exhausted (e.g. check quota).",
+		);
+		expect(body.error.message).toContain("without a retry delay");
+	});
+
+	test("leaves a body that is not a JSON error untouched", async () => {
+		const explained = await explainUnhintedRateLimit(
+			new Response("busy", { status: 429 }),
+		);
+		expect(await explained.text()).toBe("busy");
+		expect(explained.status).toBe(429);
 	});
 });
 
