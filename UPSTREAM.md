@@ -105,6 +105,49 @@ model: "gemini-4-argon-high"   → 200
 `resolveModelWithTier`/`MODEL_ALIASES`, and register the tiered ids as thinking
 variants of the Gemini 4 family.
 
+## 4. Rate limits state their wait in the body, and it is usually sub-second
+
+A momentary capacity limit is reported as a 429 whose body carries the wait; the
+`Retry-After` header is absent, so a client that only reads headers waits its own
+default (a minute) for a limit that clears in under a second:
+
+```
+POST /v1internal:generateContent
+{"error":{"code":429,"status":"RESOURCE_EXHAUSTED",
+ "message":"You have exhausted your capacity on this model. Resets in 0s.",
+ "details":[
+  {"@type":"type.googleapis.com/google.rpc.ErrorInfo","reason":"RATE_LIMIT_EXCEEDED",
+   "metadata":{"model":"gemini-3.8-flash-tiered","quotaResetDelay":"174.617923ms",
+               "quotaResetTimeStamp":"2026-11-15T08:37:34Z"}},
+  {"@type":"type.googleapis.com/google.rpc.RetryInfo","retryDelay":"0.174617923s"}]}}
+```
+
+`fetchAvailableModels` still reports `quotaInfo.remainingFraction` ≈ 1 for the
+same model, so this is a concurrency/rate limit, not quota exhaustion. The
+platform endpoint (`cloudcode-pa.googleapis.com`) answers 429 for every model on
+an account whose quota lives on the daily sandbox host, which is why the
+fallback chain has to stay on `daily-cloudcode-pa.sandbox.googleapis.com` first.
+
+**Proposed fix (done in this adapter):** read `RetryInfo.retryDelay`, then the
+`ErrorInfo` `quotaResetDelay`, then `Retry-After`, and retry after that.
+
+## 5. `gemini-3.8-flash` is served under a tier, or under `-tiered`
+
+The bare id answers 404; the fixed tiers and the tiered alias answer 200:
+
+```
+model: "gemini-3.8-flash"        → 404 NOT_FOUND
+model: "gemini-3.8-flash-low"    → 200, modelVersion gemini-3.8-flash-n
+model: "gemini-3.8-flash-high"   → 200, modelVersion gemini-3.8-flash-n
+model: "gemini-3.8-flash-tiered" → 200, modelVersion gemini-3.8-flash-tiered
+```
+
+`-tiered` keeps the requested `thinkingLevel`: sending `low` produces no thought
+tokens, `high` produces a full reasoning block. The upstream resolver strips the
+tier and fills in `low`, so a client asking for `high` silently runs cheap. The
+catalog also shows `gemini-3.6-flash-*` and `gemini-3.1-pro-*` are gone: every
+id variant of them answers 404, so a config advertising them cannot work.
+
 ## Not a factor
 
 Verified not to matter for Argon access, so no change is needed for them:

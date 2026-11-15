@@ -107,13 +107,54 @@ separate from the main Gemini quota on Pro plans, as reported by `agy`.
 
 ## Gemini 3.x Flash
 
-Versioned Gemini 3 flash models (`gemini-3.8-flash`) are served only under their tiered
-ids (`gemini-3.8-flash-low|medium|high`); the bare id gets a 404. The older
-`gemini-3-flash` is the opposite: bare id plus `thinkingLevel`. The upstream resolver
-treats both the same way and always strips the tier, so on V2 the adapter restores it
-after request preparation, taking the tier from the thinking level that goes on the wire
-(variants included) and falling back to `-low`. This fix is V2 only: on V1 the upstream
-fetch prepares and sends the request itself, so there is no point to rewrite it.
+Versioned Gemini 3 flash models (`gemini-3.8-flash`) are not served under their bare id: it
+answers 404. They are served under two kinds of tiered ids:
+
+- **Fixed tiers** (`gemini-3.8-flash-low|medium|high`), where the id pins the tier.
+- **The tiered alias** (`gemini-3.8-flash-tiered`), which takes the tier from the request's
+  `thinkingLevel` and is how one model entry can offer low, medium and high variants.
+
+The upstream resolver strips the tier off every Gemini 3 flash id and fills in its own default
+level (`low`), which silently downgrades a caller that asked for `high`. On V2 the adapter puts
+the level the caller asked for back after request preparation, and restores the tier of a bare
+id from it (`gemini-3.8-flash` + `high` → `gemini-3.8-flash-high`). The alias keeps its id: it
+is the id that reads the level. The older `gemini-3-flash` is the opposite case — bare id plus
+`thinkingLevel` — and gets the same level restoration.
+
+This fix is V2 only: on V1 the upstream fetch prepares and sends the request itself, so there
+is nothing to rewrite on the way out.
+
+## Tool schemas
+
+opencode V2 sends function declarations with `parametersJsonSchema`, the field Google's API
+documents for a full JSON Schema. The upstream transform only reads `parameters` (what V1's SDK
+sent), so without help every declaration reaches the backend with no schema, preparation fills
+in `{ "type": "OBJECT", "properties": {} }`, and the model calls tools with no arguments at
+all — `read` is invoked with `{}` and the turn cannot proceed.
+
+The adapter moves the schema onto `parameters` and runs the upstream's
+`cleanJSONSchemaForAntigravity` over it (refs, `const`, `anyOf`/`oneOf`, nullable unions and
+unsupported keywords are turned into hints the proto accepts) before preparation. A request
+that already carries `parameters` is left untouched, and each repaired body is logged at debug
+level.
+
+## Rate limits
+
+Antigravity states the wait for a retryable response in the response **body**, not in a
+`Retry-After` header:
+
+```json
+{"error":{"code":429,"status":"RESOURCE_EXHAUSTED","details":[
+  {"@type":"…/google.rpc.ErrorInfo","metadata":{"quotaResetDelay":"174.617923ms"}},
+  {"@type":"…/google.rpc.RetryInfo","retryDelay":"0.174617923s"}]}}
+```
+
+That is usually a model's per-minute capacity ("You have exhausted your capacity on this model.
+Resets in 0s"), not quota exhaustion, and it clears in well under a second. The adapter reads
+the `RetryInfo`/`ErrorInfo` delay (falling back to `Retry-After`, then to a minute), books the
+account against that wait and retries after it. A wait longer than
+`max_rate_limit_wait_seconds` is not retried at all: the turn fails with the backend's message
+instead of stalling through it.
 
 ## What is and is not ported
 
@@ -125,10 +166,12 @@ Antigravity vs Gemini CLI quota routing (including model `:antigravity` / `:cli`
 endpoint fallbacks on capacity errors, request rewriting (`cloudcode-pa.googleapis.com`, quota
 headers, thinking options) and streamed response transformation.
 
-Also handled by the adapter rather than the upstream: the CLI client identity and the
-Gemini 4 Argon model alias described above, and the managed Cloud project resolution
-(`ensureProjectContext`) that V2 previously skipped — it used to send an empty project id,
-which preparation replaced with a synthetic project no subscription is attached to.
+Also handled by the adapter rather than the upstream: the CLI client identity, the
+Gemini 4 Argon model alias and the Gemini 3.x flash thinking tier described above, the tool
+schema field opencode V2 uses, the retry delay Antigravity states in its error bodies, and the
+managed Cloud project resolution (`ensureProjectContext`) that V2 previously skipped — it used
+to send an empty project id, which preparation replaced with a synthetic project no
+subscription is attached to.
 
 Not yet ported: the `google_search` tool, the V1 `event` hook behaviours (image saving, debug
 thinking injection), thinking warmup requests, and TUI toasts (logged instead). The V1

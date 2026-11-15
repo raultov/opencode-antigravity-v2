@@ -279,6 +279,84 @@ describe("buildManagedRequest", () => {
 		}
 	});
 
+	test("keeps the requested thinking level on the tiered flash alias", async () => {
+		const d = deps({ prepare: prepareAntigravityRequest });
+		const request = new Request(
+			"https://generativelanguage.googleapis.com/v1beta/models/antigravity-gemini-3.8-flash-tiered:streamGenerateContent",
+			{
+				method: "POST",
+				body: JSON.stringify({
+					contents: [{ role: "user", parts: [{ text: "hi" }] }],
+					generationConfig: {
+						thinkingConfig: { includeThoughts: true, thinkingLevel: "high" },
+					},
+				}),
+			},
+		);
+		const built = await buildManagedRequest(request, d, SETTINGS);
+		const body = JSON.parse((await built?.request.text()) ?? "{}");
+		// The alias resolves its tier from the level, so preparation's default
+		// (`low`) would silently run the model at its cheapest tier.
+		expect(body.model).toBe("gemini-3.8-flash-tiered");
+		expect(body.request.generationConfig.thinkingConfig).toEqual({
+			includeThoughts: true,
+			thinkingLevel: "high",
+		});
+		expect(built?.meta.effectiveModel).toBe("gemini-3.8-flash-tiered");
+	});
+
+	test("restores the requested level on an unversioned Gemini 3 id", async () => {
+		const d = deps({ prepare: prepareAntigravityRequest });
+		const request = new Request(
+			"https://generativelanguage.googleapis.com/v1beta/models/gemini-3-flash:streamGenerateContent",
+			{
+				method: "POST",
+				body: JSON.stringify({
+					contents: [{ role: "user", parts: [{ text: "hi" }] }],
+					generationConfig: { thinkingConfig: { thinkingLevel: "medium" } },
+				}),
+			},
+		);
+		const built = await buildManagedRequest(request, d, SETTINGS);
+		const body = JSON.parse((await built?.request.text()) ?? "{}");
+		expect(body.model).toBe("gemini-3-flash");
+		expect(body.request.generationConfig.thinkingConfig.thinkingLevel).toBe(
+			"medium",
+		);
+	});
+
+	test("sends the tool schemas opencode V2 names parametersJsonSchema", async () => {
+		const d = deps({ prepare: prepareAntigravityRequest });
+		const request = new Request(URL, {
+			method: "POST",
+			body: JSON.stringify({
+				contents: [{ role: "user", parts: [{ text: "hi" }] }],
+				tools: [
+					{
+						functionDeclarations: [
+							{
+								name: "read",
+								description: "Read a file",
+								parametersJsonSchema: {
+									type: "object",
+									properties: { filePath: { type: "string" } },
+									required: ["filePath"],
+								},
+							},
+						],
+					},
+				],
+			}),
+		});
+		const built = await buildManagedRequest(request, d, SETTINGS);
+		const body = JSON.parse((await built?.request.text()) ?? "{}");
+		const declaration = body.request.tools[0].functionDeclarations[0];
+		expect(declaration.parameters.properties.filePath).toMatchObject({
+			type: "string",
+		});
+		expect(built?.meta.toolDebugPayload).not.toContain('"properties":{}');
+	});
+
 	test("prepares the request with the CLI User-Agent identity", async () => {
 		const d = deps();
 		const request = new Request(URL, { method: "POST", body: "{}" });

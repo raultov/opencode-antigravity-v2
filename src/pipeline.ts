@@ -9,10 +9,12 @@
  * applied through the `retry` hook.
  */
 import {
+	applyThinkingTier,
 	cliFingerprint,
+	requestedThinkingLevel,
 	rewriteModelAliasInUrl,
-	tierVersionedFlashBody,
 } from "./identity.js";
+import { repairToolSchemas } from "./tools.js";
 import {
 	ANTIGRAVITY_ENDPOINT_FALLBACKS,
 	type AntigravityConfig,
@@ -306,16 +308,29 @@ export async function buildManagedRequest(
 	// a stale or empty API key outranks the bearer token at Google's edge.
 	const headers = new Headers(original.headers);
 	for (const name of [...headers.keys()]) {
+		const lower = name.toLowerCase();
+		// A body is rebuilt below, so a copied length would be a lie.
 		if (
-			name.toLowerCase() === "x-goog-api-key" ||
-			name.toLowerCase() === "authorization"
+			lower === "x-goog-api-key" ||
+			lower === "authorization" ||
+			lower === "content-length"
 		)
 			headers.delete(name);
 	}
+	// V2 sends tool schemas in a field the upstream transform does not read, so
+	// they are moved onto the one it does before preparation consumes them.
+	const schemas = repairToolSchemas(body);
+	if (schemas) {
+		deps.log(
+			"debug",
+			`restored ${schemas.repaired} tool schema(s) sent as parametersJsonSchema`,
+		);
+	}
+	const requestBody = schemas?.body ?? body;
 	const init: RequestInit = {
 		method: original.method,
 		headers,
-		body: body.length > 0 ? body : undefined,
+		body: requestBody.length > 0 ? requestBody : undefined,
 	};
 	const endpoint = endpointFor(headerStyle, endpointIndex);
 	const prepared = deps.prepare(
@@ -335,9 +350,13 @@ export async function buildManagedRequest(
 		},
 	);
 
-	// `gemini-3.8-flash` and its siblings need a tiered id that preparation
-	// strips; it is restored from the thinking level preparation settled on.
-	const tiered = tierVersionedFlashBody(prepared.init?.body);
+	// Gemini 3 ids lose two things in preparation: the tier a versioned flash id
+	// needs, and the thinking level the caller asked for (it is replaced with the
+	// id's default). Both are restored from the original request.
+	const tiered = applyThinkingTier(
+		prepared.init?.body,
+		requestedThinkingLevel(body),
+	);
 	const request = new Request(prepared.request as RequestInfo, {
 		...(prepared.init as RequestInit),
 		...(tiered ? { body: tiered.body } : {}),

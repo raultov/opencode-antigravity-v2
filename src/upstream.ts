@@ -38,6 +38,13 @@ export {
 	prepareAntigravityRequest,
 	transformAntigravityResponse,
 } from "opencode-antigravity-auth/dist/src/plugin/request.js";
+/**
+ * Rewrites a full JSON Schema into the subset the Antigravity proto accepts:
+ * refs, `const`, `anyOf`/`oneOf` and unsupported keywords become hints, and
+ * nullable unions collapse to their base type. This is the same cleaner the
+ * upstream applies to Claude tool schemas.
+ */
+export { cleanJSONSchemaForAntigravity } from "opencode-antigravity-auth/dist/src/plugin/request-helpers.js";
 export type { OAuthListener } from "opencode-antigravity-auth/dist/src/plugin/server.js";
 export { startOAuthListener } from "opencode-antigravity-auth/dist/src/plugin/server.js";
 export type { AccountStorageV4 } from "opencode-antigravity-auth/dist/src/plugin/storage.js";

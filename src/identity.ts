@@ -32,6 +32,12 @@ const MODEL_ALIASES: Record<string, string> = {
  */
 const VERSIONED_GEMINI_3_FLASH = /^gemini-3\.\d+-flash$/i;
 
+/** A model id that pins its own thinking tier (`…-flash-high`). */
+const FIXED_TIER = /-(?:minimal|low|medium|high)$/i;
+
+/** Thinking levels the backend accepts. */
+const THINKING_LEVELS = new Set(["minimal", "low", "medium", "high"]);
+
 /** Tier suffixes the backend serves for versioned Gemini 3 flash models. */
 const FLASH_TIERS = new Set(["low", "medium", "high"]);
 
@@ -76,26 +82,82 @@ export function tierVersionedFlashModel(
 }
 
 /**
- * Applies `tierVersionedFlashModel` to a prepared (Antigravity-wrapped)
- * request body.
- *
- * The upstream resolver strips the tier off every Gemini 3 flash id, which is
- * right for `gemini-3-flash` but sends `gemini-3.8-flash` bare. The tier is
- * restored here, after preparation, so it follows the thinking level that
- * actually goes on the wire, variant overrides included.
- *
- * Returns undefined when the body is not a wrapped request or its model needs
- * no tier.
+ * Normalises a thinking level onto the ones the backend accepts, or undefined
+ * when the value is not a level at all.
  */
-export function tierVersionedFlashBody(
+export function normalizeThinkingLevel(value: unknown): string | undefined {
+	if (typeof value !== "string") return undefined;
+	const level = value.toLowerCase();
+	return THINKING_LEVELS.has(level) ? level : undefined;
+}
+
+/** The generation config of a Generative Language payload, wrapped or not. */
+function generationConfigOf(
+	payload: Record<string, unknown>,
+): Record<string, unknown> | undefined {
+	const config = payload.generationConfig ?? payload.generation_config;
+	return isObject(config) ? config : undefined;
+}
+
+function isObject(value: unknown): value is Record<string, unknown> {
+	return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+/**
+ * Reads the thinking level a caller asked for out of a request body.
+ *
+ * The caller's level is the one from opencode's model options, and request
+ * preparation overwrites it with whatever the model id implies, so it has to
+ * be captured before the prepared body replaces the original one.
+ */
+export function requestedThinkingLevel(
+	body: string | undefined,
+): string | undefined {
+	if (!body) return undefined;
+	let parsed: unknown;
+	try {
+		parsed = JSON.parse(body);
+	} catch {
+		return undefined;
+	}
+	if (!isObject(parsed)) return undefined;
+	const payload = isObject(parsed.request) ? parsed.request : parsed;
+	const config = generationConfigOf(payload);
+	if (!config) return undefined;
+	const thinking = config.thinkingConfig ?? config.thinking_config;
+	if (!isObject(thinking)) return undefined;
+	return normalizeThinkingLevel(
+		thinking.thinkingLevel ?? thinking.thinking_level,
+	);
+}
+
+/**
+ * Applies the tier and the thinking level a prepared request needs.
+ *
+ * Two things are undone here, both of them consequences of the upstream
+ * resolver keying thinking off the model id:
+ *
+ * - Gemini 3 ids without a tier (`gemini-3-flash`, and versioned families sent
+ *   under their bare id) get a default level of `low`, which silently
+ *   downgrades a caller that asked for `high`. The caller's level is put back.
+ * - A versioned family sent bare (`gemini-3.8-flash`) is not served at all, so
+ *   the tier the level implies is appended (`gemini-3.8-flash-high`).
+ *
+ * The `…-flash-tiered` alias is left as it is: it is the id that reads the
+ * level, which is exactly what the restore above makes visible. Ids carrying a
+ * fixed tier keep both their id and the level that tier implies.
+ *
+ * Returns the serialized body and the model it sends, or undefined when
+ * nothing changed or the body is not a wrapped request.
+ */
+export function applyThinkingTier(
 	body: unknown,
+	requestedLevel?: unknown,
 ): { body: string; model: string } | undefined {
 	if (typeof body !== "string" || body.length === 0) return undefined;
 	let wrapped: {
 		model?: unknown;
-		request?: {
-			generationConfig?: { thinkingConfig?: { thinkingLevel?: unknown } };
-		};
+		request?: unknown;
 	};
 	try {
 		wrapped = JSON.parse(body) as typeof wrapped;
@@ -103,12 +165,50 @@ export function tierVersionedFlashBody(
 		return undefined;
 	}
 	if (typeof wrapped?.model !== "string") return undefined;
-	const model = tierVersionedFlashModel(
-		wrapped.model,
-		wrapped.request?.generationConfig?.thinkingConfig?.thinkingLevel,
-	);
-	if (model === wrapped.model) return undefined;
-	return { body: JSON.stringify({ ...wrapped, model }), model };
+	const model = wrapped.model;
+	// Claude and the older Gemini families take a numeric budget, which
+	// preparation already resolves from the caller's own config.
+	if (!/^gemini-3/i.test(model)) return undefined;
+
+	const payload = isObject(wrapped.request) ? wrapped.request : {};
+	const config = generationConfigOf(payload);
+	const thinking = config
+		? (config.thinkingConfig ?? config.thinking_config)
+		: undefined;
+	const preparedLevel = isObject(thinking)
+		? normalizeThinkingLevel(thinking.thinkingLevel ?? thinking.thinking_level)
+		: undefined;
+	const level = normalizeThinkingLevel(requestedLevel) ?? preparedLevel;
+
+	let nextModel = model;
+	if (VERSIONED_GEMINI_3_FLASH.test(model)) {
+		nextModel = tierVersionedFlashModel(model, level);
+	}
+	// A fixed-tier id already carries its level; anything else gets whatever the
+	// caller asked for, because preparation filled in the id's default.
+	const restoreLevel =
+		level !== undefined &&
+		!FIXED_TIER.test(nextModel) &&
+		level !== preparedLevel;
+
+	if (nextModel === model && !restoreLevel) return undefined;
+
+	const nextRequest = restoreLevel
+		? {
+				...payload,
+				generationConfig: {
+					...(config ?? {}),
+					thinkingConfig: {
+						...(isObject(thinking) ? thinking : {}),
+						thinkingLevel: level,
+					},
+				},
+			}
+		: payload;
+	const next = restoreLevel
+		? { ...wrapped, model: nextModel, request: nextRequest }
+		: { ...wrapped, model: nextModel };
+	return { body: JSON.stringify(next), model: nextModel };
 }
 
 /**

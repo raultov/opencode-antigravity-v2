@@ -38,8 +38,9 @@ function managerStub() {
 		getMinWaitTimeForSoftQuota: () => null,
 		getMinWaitTimeForFamily: () => 5_000,
 		markAccountCoolingDown: () => undefined,
-		markRateLimited: () => {
+		markRateLimited: (_account: unknown, delayMs: number) => {
 			managerStubMarks += 1;
+			managerStubDelays.push(delayMs);
 		},
 		toAuthDetails: () => freshAuth,
 		updateFromAuth: () => undefined,
@@ -47,6 +48,7 @@ function managerStub() {
 	};
 }
 let managerStubMarks = 0;
+const managerStubDelays: number[] = [];
 
 function setup() {
 	const hooks = new Map<string, HookHandler>();
@@ -171,6 +173,93 @@ describe("AntigravityAuthV2", () => {
 		};
 		await hooks.get("retry")?.(retry);
 		expect(retry.decision).toEqual({ retry: true, delay: 7_000 });
+	});
+
+	test("retries after the sub-second wait the error body names", async () => {
+		managerStubMarks = 0;
+		managerStubDelays.length = 0;
+		const { hooks, ctx, plugin } = setup();
+		await plugin.setup(ctx);
+
+		const event = {
+			sessionID: "s1",
+			model: { providerID: "google", id: "m" },
+			request: new Request(URL),
+			response: new Response(
+				JSON.stringify({
+					error: {
+						code: 429,
+						message:
+							"You have exhausted your capacity on this model. Resets in 0s.",
+						status: "RESOURCE_EXHAUSTED",
+						details: [
+							{
+								"@type": "type.googleapis.com/google.rpc.ErrorInfo",
+								metadata: { quotaResetDelay: "174.617923ms" },
+							},
+							{
+								"@type": "type.googleapis.com/google.rpc.RetryInfo",
+								retryDelay: "0.174617923s",
+							},
+						],
+					},
+				}),
+				{ status: 429 },
+			),
+		};
+		await hooks.get("http.request")?.(event);
+		await hooks.get("http.response")?.(event);
+		// No Retry-After header here: the wait Antigravity names is in the body.
+		expect(managerStubDelays).toEqual([175]);
+
+		const retry = {
+			sessionID: "s1",
+			model: { providerID: "google", id: "m" },
+			error: {},
+			attempt: 1,
+			decision: { retry: false } as { retry: boolean; delay?: number },
+		};
+		await hooks.get("retry")?.(retry);
+		expect(retry.decision).toEqual({ retry: true, delay: 175 });
+	});
+
+	test("does not retry a quota that resets outside the wait budget", async () => {
+		const { hooks, ctx, plugin } = setup();
+		await plugin.setup(ctx);
+
+		const event = {
+			sessionID: "s1",
+			model: { providerID: "google", id: "m" },
+			request: new Request(URL),
+			response: new Response(
+				JSON.stringify({
+					error: {
+						code: 429,
+						message: "Resource has been exhausted.",
+						status: "RESOURCE_EXHAUSTED",
+						details: [
+							{
+								"@type": "type.googleapis.com/google.rpc.RetryInfo",
+								retryDelay: "7200s",
+							},
+						],
+					},
+				}),
+				{ status: 429 },
+			),
+		};
+		await hooks.get("http.request")?.(event);
+		await hooks.get("http.response")?.(event);
+
+		const retry = {
+			sessionID: "s1",
+			model: { providerID: "google", id: "m" },
+			error: {},
+			attempt: 1,
+			decision: { retry: false },
+		};
+		await hooks.get("retry")?.(retry);
+		expect(retry.decision.retry).toBe(false);
 	});
 
 	test("does not retry past the adapter's attempt budget", async () => {

@@ -3,14 +3,16 @@ import { chmod, mkdtemp, readFile, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
+	applyThinkingTier,
 	cliFingerprint,
 	cliUserAgent,
 	hasCliUserAgent,
 	migrateFingerprintsToCliUserAgent,
+	normalizeThinkingLevel,
+	requestedThinkingLevel,
 	resolveModelAlias,
 	rewriteModelAliasInUrl,
 	rewriteRequestModel,
-	tierVersionedFlashBody,
 	tierVersionedFlashModel,
 } from "../src/identity.js";
 
@@ -99,7 +101,7 @@ describe("tierVersionedFlashModel", () => {
 	});
 });
 
-describe("tierVersionedFlashBody", () => {
+describe("applyThinkingTier", () => {
 	const wrapped = (model: string, thinkingLevel?: string) =>
 		JSON.stringify({
 			project: "p",
@@ -110,8 +112,8 @@ describe("tierVersionedFlashBody", () => {
 			},
 		});
 
-	test("rewrites only the model of a wrapped body", () => {
-		const tiered = tierVersionedFlashBody(wrapped("gemini-3.8-flash", "high"));
+	test("rewrites only the model of a bare versioned flash id", () => {
+		const tiered = applyThinkingTier(wrapped("gemini-3.8-flash", "high"));
 		expect(tiered?.model).toBe("gemini-3.8-flash-high");
 		const body = JSON.parse(tiered?.body ?? "{}");
 		expect(body.model).toBe("gemini-3.8-flash-high");
@@ -121,13 +123,119 @@ describe("tierVersionedFlashBody", () => {
 		);
 	});
 
-	test("returns undefined when nothing needs a tier", () => {
-		expect(tierVersionedFlashBody(wrapped("gemini-3-flash", "low"))).toBe(
+	test("restores the requested level on the tiered alias, keeping its id", () => {
+		// Preparation writes the id's default level, so the caller's high is
+		// gone by the time the body reaches here.
+		const tiered = applyThinkingTier(
+			wrapped("gemini-3.8-flash-tiered", "low"),
+			"high",
+		);
+		expect(tiered?.model).toBe("gemini-3.8-flash-tiered");
+		const body = JSON.parse(tiered?.body ?? "{}");
+		expect(body.model).toBe("gemini-3.8-flash-tiered");
+		expect(body.request.generationConfig.thinkingConfig.thinkingLevel).toBe(
+			"high",
+		);
+	});
+
+	test("keeps includeThoughts while restoring the level", () => {
+		const prepared = JSON.stringify({
+			model: "gemini-3.8-flash-tiered",
+			request: {
+				generationConfig: {
+					maxOutputTokens: 65536,
+					thinkingConfig: { includeThoughts: true, thinkingLevel: "low" },
+				},
+			},
+		});
+		const tiered = applyThinkingTier(prepared, "medium");
+		const body = JSON.parse(tiered?.body ?? "{}");
+		expect(body.request.generationConfig.thinkingConfig).toEqual({
+			includeThoughts: true,
+			thinkingLevel: "medium",
+		});
+		expect(body.request.generationConfig.maxOutputTokens).toBe(65536);
+	});
+
+	test("leaves a fixed-tier id alone", () => {
+		expect(
+			applyThinkingTier(wrapped("gemini-3.8-flash-high", "high"), "high"),
+		).toBe(undefined);
+		expect(
+			applyThinkingTier(wrapped("gemini-4-argon-low", "low"), "high"),
+		).toBe(undefined);
+	});
+
+	test("restores the requested level on an unversioned Gemini 3 id", () => {
+		const restored = applyThinkingTier(
+			wrapped("gemini-3-flash", "low"),
+			"high",
+		);
+		expect(restored?.model).toBe("gemini-3-flash");
+		const body = JSON.parse(restored?.body ?? "{}");
+		expect(body.request.generationConfig.thinkingConfig.thinkingLevel).toBe(
+			"high",
+		);
+	});
+
+	test("returns undefined when nothing changes", () => {
+		expect(applyThinkingTier(wrapped("gemini-3-flash", "low"))).toBeUndefined();
+		expect(applyThinkingTier(wrapped("claude-opus-5-5-medium", "low"))).toBe(
 			undefined,
 		);
-		expect(tierVersionedFlashBody("not json")).toBeUndefined();
-		expect(tierVersionedFlashBody(undefined)).toBeUndefined();
-		expect(tierVersionedFlashBody("{}")).toBeUndefined();
+		expect(applyThinkingTier(wrapped("gemini-2.5-pro", "low"))).toBeUndefined();
+		expect(applyThinkingTier("not json")).toBeUndefined();
+		expect(applyThinkingTier(undefined)).toBeUndefined();
+		expect(applyThinkingTier("{}")).toBeUndefined();
+	});
+});
+
+describe("requestedThinkingLevel", () => {
+	test("reads the level out of a plain request body", () => {
+		expect(
+			requestedThinkingLevel(
+				JSON.stringify({
+					contents: [],
+					generationConfig: { thinkingConfig: { thinkingLevel: "HIGH" } },
+				}),
+			),
+		).toBe("high");
+	});
+
+	test("reads the level out of a wrapped body and snake_case fields", () => {
+		expect(
+			requestedThinkingLevel(
+				JSON.stringify({
+					request: {
+						generation_config: {
+							thinking_config: { thinking_level: "medium" },
+						},
+					},
+				}),
+			),
+		).toBe("medium");
+	});
+
+	test("ignores bodies without a usable level", () => {
+		expect(requestedThinkingLevel(undefined)).toBeUndefined();
+		expect(requestedThinkingLevel("not json")).toBeUndefined();
+		expect(requestedThinkingLevel("{}")).toBeUndefined();
+		expect(
+			requestedThinkingLevel(
+				JSON.stringify({
+					generationConfig: { thinkingConfig: { thinkingBudget: 8192 } },
+				}),
+			),
+		).toBeUndefined();
+	});
+});
+
+describe("normalizeThinkingLevel", () => {
+	test("accepts the levels the backend knows and rejects everything else", () => {
+		expect(normalizeThinkingLevel("High")).toBe("high");
+		expect(normalizeThinkingLevel("minimal")).toBe("minimal");
+		expect(normalizeThinkingLevel("extreme")).toBeUndefined();
+		expect(normalizeThinkingLevel(3)).toBeUndefined();
 	});
 });
 

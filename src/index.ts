@@ -40,6 +40,7 @@ import {
 	type PipelineSettings,
 	settingsFrom,
 } from "./pipeline.js";
+import { serverRetryMs } from "./retry.js";
 import {
 	AccountManager,
 	authorizeAntigravity,
@@ -56,19 +57,10 @@ import {
 	transformAntigravityResponse,
 } from "./upstream.js";
 
+export { retryAfterMs } from "./retry.js";
+
 const RETRYABLE_STATUSES = new Set([429, 503, 529]);
 const MAX_ADAPTER_RETRIES = 3;
-const DEFAULT_RETRY_AFTER_MS = 60_000;
-
-/** Retry-after header, in milliseconds, with the V1 fetch's default. */
-export function retryAfterMs(
-	response: Response,
-	fallback = DEFAULT_RETRY_AFTER_MS,
-): number {
-	const header = response.headers.get("retry-after");
-	const seconds = header ? Number(header) : Number.NaN;
-	return Number.isFinite(seconds) && seconds > 0 ? seconds * 1000 : fallback;
-}
 
 type RetryState = { attempts: number; delayMs: number; endpointIndex: number };
 
@@ -180,9 +172,12 @@ export function createAntigravityAuthV2(
 
 				const status = event.response.status;
 				if (RETRYABLE_STATUSES.has(status)) {
+					// Antigravity states the wait in the body, usually well under a
+					// second; a fixed default would turn a capacity blip into a stall.
+					const delayMs = await serverRetryMs(event.response);
 					meta.manager.markRateLimited(
 						meta.account,
-						retryAfterMs(event.response),
+						delayMs,
 						meta.family,
 						meta.headerStyle,
 						meta.model,
@@ -191,7 +186,7 @@ export function createAntigravityAuthV2(
 					const previous = retryBySession.get(sessionID);
 					retryBySession.set(sessionID, {
 						attempts: previous?.attempts ?? 0,
-						delayMs: retryAfterMs(event.response),
+						delayMs,
 						// Capacity errors move the antigravity endpoint forward; rate
 						// limits stay put and rotate the account instead.
 						endpointIndex:
@@ -221,6 +216,9 @@ export function createAntigravityAuthV2(
 				const sessionID = String(event.sessionID);
 				const state = retryBySession.get(sessionID);
 				if (!state || state.attempts >= MAX_ADAPTER_RETRIES) return;
+				// A wait longer than the caller's budget is a quota that will not come
+				// back for this turn: fail now instead of stalling for minutes.
+				if (state.delayMs > settings.maxWaitMs) return;
 				state.attempts += 1;
 				event.decision = { retry: true, delay: state.delayMs };
 				log(
