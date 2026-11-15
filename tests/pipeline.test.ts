@@ -357,6 +357,37 @@ describe("buildManagedRequest", () => {
 		expect(built?.meta.toolDebugPayload).not.toContain('"properties":{}');
 	});
 
+	test("sends opencode's system prompt without the text the backend refuses", async () => {
+		const d = deps({ prepare: prepareAntigravityRequest });
+		const request = new Request(URL, {
+			method: "POST",
+			body: JSON.stringify({
+				contents: [
+					{
+						role: "user",
+						parts: [{ text: "call tools.opencode.session_move for me" }],
+					},
+				],
+				systemInstruction: {
+					parts: [
+						{
+							text: "consider using `execute` to call `tools.opencode.session_move`",
+						},
+					],
+				},
+			}),
+		});
+		const built = await buildManagedRequest(request, d, SETTINGS);
+		const body = JSON.parse((await built?.request.text()) ?? "{}");
+		const system = JSON.stringify(body.request.systemInstruction);
+		expect(system).not.toMatch(/tools\.opencode\.session_move/i);
+		expect(system).toContain('tools.opencode[\\"session_move\\"]');
+		// The user's own words are not the backend's concern and stay as written.
+		expect(body.request.contents[0].parts[0].text).toBe(
+			"call tools.opencode.session_move for me",
+		);
+	});
+
 	test("prepares the request with the CLI User-Agent identity", async () => {
 		const d = deps();
 		const request = new Request(URL, { method: "POST", body: "{}" });

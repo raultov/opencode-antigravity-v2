@@ -164,6 +164,22 @@ where an account without a Gemini Code Assist licence gets `403 SUBSCRIPTION_REQ
 shown in opencode carries a note saying so. See `UPSTREAM.md` §6 for the one cause identified so
 far.
 
+## System prompt
+
+The backend refuses (with the 429 above) any request whose system prompt contains
+`tools.opencode.session_move`, and opencode V2 puts that text in every system prompt: a worktree
+hint from its built-in tools plugin and the Code Mode catalog. Neither can be turned off from
+configuration, so without help no opencode V2 turn reaches the model.
+
+The adapter rewrites that reference in the system instruction as
+`tools.opencode["session_move"]`. It is the same JavaScript call, so the model can still use the
+tool from `execute`. The conversation, tool calls and tool descriptions are not touched; the
+backend accepts the text there. Each rewrite is logged at debug level.
+
+> **Risk.** It is not known whether this refusal is a deliberate filter on third-party clients.
+> If it is, working around it may breach Google's terms for Antigravity and put the account at
+> risk. Use it knowing that.
+
 ## What is and is not ported
 
 This applies to V2 only. V1 runs the upstream plugin, so every upstream feature is there.
@@ -176,7 +192,8 @@ headers, thinking options) and streamed response transformation.
 
 Also handled by the adapter rather than the upstream: the CLI client identity, the
 Gemini 4 Argon model alias and the Gemini 3.x flash thinking tier described above, the tool
-schema field opencode V2 uses, the retry delay Antigravity states in its error bodies, and the
+schema field opencode V2 uses, the retry delay Antigravity states in its error bodies, the
+system prompt reference the backend refuses, and the
 managed Cloud project resolution (`ensureProjectContext`) that V2 previously skipped — it used
 to send an empty project id, which preparation replaced with a synthetic project no
 subscription is attached to.

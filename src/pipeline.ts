@@ -14,6 +14,7 @@ import {
 	requestedThinkingLevel,
 	rewriteModelAliasInUrl,
 } from "./identity.js";
+import { rewriteRefusedSystemText } from "./prompt.js";
 import { repairToolSchemas } from "./tools.js";
 import {
 	ANTIGRAVITY_ENDPOINT_FALLBACKS,
@@ -326,7 +327,17 @@ export async function buildManagedRequest(
 			`restored ${schemas.repaired} tool schema(s) sent as parametersJsonSchema`,
 		);
 	}
-	const requestBody = schemas?.body ?? body;
+	// The backend refuses opencode's own system prompt over one tool reference
+	// (a 429 that names no wait); it is rewritten as the equivalent bracket
+	// access, which the backend accepts and the model reads the same way.
+	const prompt = rewriteRefusedSystemText(schemas?.body ?? body);
+	if (prompt) {
+		deps.log(
+			"debug",
+			`rewrote ${prompt.rewritten} system prompt reference(s) the backend refuses`,
+		);
+	}
+	const requestBody = prompt?.body ?? schemas?.body ?? body;
 	const init: RequestInit = {
 		method: original.method,
 		headers,
